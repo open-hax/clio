@@ -83,8 +83,16 @@
       (sync-directory! directory)))
   path)
 
+(defn force-file!
+  "Force an owning file descriptor before acknowledging durable file content."
+  [^FileChannel channel]
+  (.force channel true))
+
 (defn create-exclusive! [path]
-  (Files/createFile (nio-path path) no-attributes)
+  (with-open [channel (FileChannel/open (nio-path path)
+                                      (into-array OpenOption [StandardOpenOption/CREATE_NEW
+                                                              StandardOpenOption/WRITE]))]
+    (force-file! channel))
   (sync-directory! (parent-path path))
   path)
 
