@@ -247,14 +247,22 @@ Both adapters flush appended data (`fsync` / `FileChannel.force`) before
 returning success. Atomic rename is required for projection replacement; a
 filesystem that cannot provide it fails rather than silently downgrading.
 
-The JVM schema writer additionally forces affected parent directories after an
-atomic rename and persists newly created directory ancestry. This stronger
-directory durability contract is supported on the Linux default POSIX filesystem,
-where the adapter checks support and opens a read-only directory channel.
+Both schema writers synchronize temporary file contents before atomic rename,
+force affected parent directories before and after publication, and persist
+newly created directory ancestry. Empty ledger creation also synchronizes its
+inode and parent before returning success. This directory durability contract
+is supported on Linux filesystems that allow directory synchronization; the
+Node adapter uses `fsync` on a read-only directory descriptor and the JVM adapter
+uses the default POSIX provider's read-only directory channel.
 Unsupported hosts or failed directory forces raise
 `:clio.fs/directory-sync-unavailable`; no successful schema publication is
 reported. A force failure after the move can leave the new path present, but
 the caller still receives failure and must not acknowledge dependent events.
+The Node adapter resynchronizes existing ancestry on retry, including directories
+left present by a previously refused force. Tests observe real filesystem calls,
+inject file and directory synchronization failures, and verify that no dependent
+event is admitted. These tests establish syscall sequencing and failure handling;
+they do not simulate physical power loss or storage hardware guarantees.
 
 `clio.domain.canonicalize/canonicalize` performs:
 

@@ -1,6 +1,7 @@
 (ns clio.jvm-test-runner
   (:require [clio.domain.canonicalize-test]
             [clio.domain.schema-test]
+            [clio.infra.jvm-durability-retry-test]
             [clio.infra.jvm-ledger-test]
             [clio.law.ledger-test]
             [clio.lint-extern-boundary-test]
@@ -12,6 +13,7 @@
   (let [{:keys [fail error]}
         (test/run-tests 'clio.domain.canonicalize-test
                         'clio.domain.schema-test
+                        'clio.infra.jvm-durability-retry-test
                         'clio.infra.jvm-ledger-test
                         'clio.law.ledger-test
                         'clio.lint-extern-boundary-test

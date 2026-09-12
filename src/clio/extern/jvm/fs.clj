@@ -72,14 +72,14 @@
   (str (.getParent (.toAbsolutePath (nio-path path)))))
 
 (defn ensure-dir! [path]
-  (let [missing (loop [directory (.toAbsolutePath (nio-path path)) result []]
-                  (if (or (nil? directory) (Files/exists directory no-links))
+  (let [ancestry (loop [directory (.normalize (.toAbsolutePath (nio-path path))) result []]
+                  (if (nil? directory)
                     result
                     (recur (.getParent directory) (conj result (str directory)))))]
     (Files/createDirectories (nio-path path) no-attributes)
-    ;; Force the ancestry too: a durable schema entry is useless if a newly
-    ;; created containing directory disappears at its parent's entry.
-    (doseq [directory (distinct (concat missing (map parent-path missing)))]
+    ;; An earlier mkdir may have succeeded before its parent force failed.
+    ;; Existing paths therefore need the same durability check on retry.
+    (doseq [directory ancestry]
       (sync-directory! directory)))
   path)
 

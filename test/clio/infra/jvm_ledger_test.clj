@@ -143,6 +143,27 @@
                    (:projection result))))
           (finally (support/stop! peer)))))))
 
+(deftest jvm-reopens-node-created-durable-schema-and-ledger
+  (let [directory (str "/tmp/clio-node-first-" (host/random-uuid))
+        child (str directory "/node-created")
+        output (str directory "/peer.out")]
+    (try
+      (fs/ensure-dir! directory)
+      (let [peer (support/start! ["nbb" "-cp" "test" "test/clio/infra/durability_peer.nbb" child] output)]
+        (try
+          (is (= 0 (support/finish! peer)) (fs/read-text output))
+          (let [result (edn/read-one (str/trim (fs/read-text output)))
+                reopened (runtime/open (str child "/nested/schemas") fixture/catalog)
+                path (str child "/events.edn")
+                events (:canonical/events (ledger/canonicalize-files (:schema/revisions reopened) [path]))]
+            (is (= :appended (:append/result result)))
+            (is (= [(:event result)] events))
+            (is (= fixture/payload (:event/data (first events))))
+            (is (= (get-in reopened [:schema/current :schema/root])
+                   (get-in result [:event :event/schema :schema/root]))))
+          (finally (support/stop! peer))))
+      (finally (fs/remove-tree! directory)))))
+
 (deftest node-replays-both-admitted-calendar-boundaries-from-jvm
   (doseq [millis [-12219292800000 253402300799999]]
     (with-ledger

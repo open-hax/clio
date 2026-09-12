@@ -1,21 +1,57 @@
 (ns clio.extern.js.fs
   (:refer-clojure :exclude [exists?])
   (:require ["fs-ext-extra-prebuilt" :as fs-ext]
-            ["node:fs" :as fs]))
+            ["node:fs" :as fs]
+            ["node:path" :as node-path]))
 
 (defn exists?
   [path]
   (boolean (fs/existsSync path)))
 
-(defn ensure-dir!
+(defn sync-directory!
+  "Force directory entries on the supported Linux filesystem; never acknowledge a weaker write."
   [path]
-  (fs/mkdirSync path #js {:recursive true})
+  (when-not (= "linux" (.-platform js/process))
+    (throw (ex-info "Node directory durability is unsupported on this platform"
+                    {:path path :clio/error :clio.fs/directory-sync-unavailable})))
+  (try
+    (let [flags (bit-or (.-O_RDONLY (.-constants fs)) (.-O_DIRECTORY (.-constants fs)))
+          fd (.openSync fs path flags)]
+      (try (.fsyncSync fs fd) (finally (.closeSync fs fd))))
+    (catch :default cause
+      (throw (ex-info "Node directory synchronization failed"
+                      {:path path :clio/error :clio.fs/directory-sync-unavailable} cause))))
   path)
+
+(defn- parent-path [path]
+  (.dirname node-path (.resolve node-path path)))
+
+(defn- ancestry [path]
+  (loop [directory (.resolve node-path path) result []]
+    (let [parent (parent-path directory) result (conj result directory)]
+      (if (= parent directory) result (recur parent result)))))
+
+(defn ensure-dir!
+  "Persist new ancestry, including existing ancestors left by a previously refused sync."
+  [path]
+  (let [parents (ancestry path)]
+    (sync-directory! (first (filter exists? parents)))
+    (.mkdirSync fs path #js {:recursive true})
+    (doseq [directory parents] (sync-directory! directory)))
+  path)
+
+(defn- sync-file! [fd path]
+  (try (.fsyncSync fs fd)
+       (catch :default cause
+         (throw (ex-info "Node file synchronization failed"
+                         {:path path :clio/error :clio.fs/file-sync-unavailable} cause)))))
 
 (defn create-exclusive!
   [path]
-  (let [fd (fs/openSync path "wx")]
-    (fs/closeSync fd))
+  (sync-directory! (parent-path path))
+  (let [fd (.openSync fs path "wx")]
+    (try (sync-file! fd path) (finally (.closeSync fs fd))))
+  (sync-directory! (parent-path path))
   path)
 
 (def ^:private locked-paths
@@ -47,12 +83,21 @@
 
 (defn write-text!
   [path text]
-  (fs/writeFileSync path text "utf8")
+  (sync-directory! (parent-path path))
+  (let [fd (.openSync fs path "w")]
+    (try
+      (.writeFileSync fs fd text "utf8")
+      (sync-file! fd path)
+      (finally (.closeSync fs fd))))
+  (sync-directory! (parent-path path))
   path)
 
 (defn rename!
   [from to]
-  (fs/renameSync from to)
+  (let [parents (distinct [(parent-path from) (parent-path to)])]
+    (doseq [directory parents] (sync-directory! directory))
+    (.renameSync fs from to)
+    (doseq [directory parents] (sync-directory! directory)))
   to)
 
 (defn hard-link!
@@ -154,7 +199,7 @@
    creation path; an absent ledger fails with ENOENT."
   [path]
   (let [flags (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs)))
-        fd (fs/openSync path flags)]
+        fd (.openSync fs path flags)]
     (try
       (acquire-native-lock! fd)
       (swap! locked-paths conj path)
@@ -172,7 +217,7 @@
   "Append and fsync through the descriptor that owns the kernel lock."
   [{:lock/keys [fd path]} text]
   (fs/appendFileSync fd text "utf8")
-  (fs/fsyncSync fd)
+  (.fsyncSync fs fd)
   path)
 
 (defn release-lock!
