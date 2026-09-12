@@ -4,7 +4,6 @@
             [clio.extern.js.fs :as fs]
             [clio.infra.ledger :as ledger]
             [clio.infra.runtime :as runtime]
-            [clio.infra.schema-store :as schema-store]
             [clio.law.cli :as cli-law]
             [clio.shape.edn :as edn]))
 
@@ -40,8 +39,7 @@
     (prn (select-keys result [:append/result :event]))))
 
 (defn- command-canonicalize [[schema-dir & ledger-files]]
-  (let [revisions (schema-store/load-revisions schema-dir)
-        canonical (ledger/canonicalize-files revisions ledger-files)]
+  (let [canonical (runtime/canonicalize-files {:schema/directory schema-dir} ledger-files)]
     (prn (select-keys canonical [:canonical/event-ids :canonical/events]))))
 
 (defn -main [& args]
