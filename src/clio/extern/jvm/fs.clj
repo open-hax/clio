@@ -46,12 +46,46 @@
 (defn exists? [path]
   (Files/exists (nio-path path) no-links))
 
+(defn sync-directory!
+  "Force directory entries on the supported Linux default POSIX filesystem.
+
+   Directory FileChannels are not portable Java. Refuse other implementations
+   and surface open/force failures instead of acknowledging weaker durability."
+  [path]
+  (let [directory (.toAbsolutePath (nio-path path))
+        filesystem (.getFileSystem directory)]
+    (when-not (and (= "Linux" (System/getProperty "os.name"))
+                   (= "file" (.getScheme (.provider filesystem)))
+                   (.contains (.supportedFileAttributeViews filesystem) "posix"))
+      (throw (ex-info "JVM directory durability is unsupported on this filesystem"
+                      {:path path :clio/error :clio.fs/directory-sync-unavailable})))
+    (try
+      (with-open [channel (FileChannel/open directory
+                                            (into-array OpenOption [StandardOpenOption/READ]))]
+        (.force channel true))
+      (catch Exception cause
+        (throw (ex-info "JVM directory synchronization failed"
+                        {:path path :clio/error :clio.fs/directory-sync-unavailable} cause)))))
+  path)
+
+(defn- parent-path [path]
+  (str (.getParent (.toAbsolutePath (nio-path path)))))
+
 (defn ensure-dir! [path]
-  (Files/createDirectories (nio-path path) no-attributes)
+  (let [missing (loop [directory (.toAbsolutePath (nio-path path)) result []]
+                  (if (or (nil? directory) (Files/exists directory no-links))
+                    result
+                    (recur (.getParent directory) (conj result (str directory)))))]
+    (Files/createDirectories (nio-path path) no-attributes)
+    ;; Force the ancestry too: a durable schema entry is useless if a newly
+    ;; created containing directory disappears at its parent's entry.
+    (doseq [directory (distinct (concat missing (map parent-path missing)))]
+      (sync-directory! directory)))
   path)
 
 (defn create-exclusive! [path]
   (Files/createFile (nio-path path) no-attributes)
+  (sync-directory! (parent-path path))
   path)
 
 (defn read-text
@@ -77,13 +111,19 @@
                                         [StandardOpenOption/CREATE
                                          StandardOpenOption/WRITE
                                          StandardOpenOption/TRUNCATE_EXISTING]))]
-         (write-buffer! channel text))))
+         (write-buffer! channel text))
+       (sync-directory! (parent-path path))))
   path)
 
 (defn rename! [from to]
-  (Files/move (nio-path from) (nio-path to)
-              (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
-                                      StandardCopyOption/REPLACE_EXISTING]))
+  (let [parents (distinct [(parent-path from) (parent-path to)])]
+    ;; Check support before changing the namespace, then force both affected
+    ;; parents after the atomic move. Post-move failure remains a failed write.
+    (doseq [directory parents] (sync-directory! directory))
+    (Files/move (nio-path from) (nio-path to)
+                (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                                        StandardCopyOption/REPLACE_EXISTING]))
+    (doseq [directory parents] (sync-directory! directory)))
   to)
 
 (defn hard-link! [from to]

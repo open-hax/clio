@@ -1,5 +1,6 @@
 (ns clio.shape.canonical
-  (:require [clojure.string :as str]))
+  (:require [clio.shape.edn :as edn]
+            [clojure.string :as str]))
 
 (declare canonical-form)
 
@@ -157,19 +158,26 @@
 
 (defn- canonical-instant
   [value]
-  (let [millis (inst-ms value)]
-    ;; JavaScript Date's supported range is narrower than a safe integer or
-    ;; java.util.Date. Reject wider JVM instants rather than assigning a root
-    ;; whose value a Node reader cannot represent. Invalid JS dates yield NaN.
-    (when-not (and (finite? millis) (<= -8640000000000000 millis 8640000000000000))
-      (throw (ex-info "Instant is outside the portable epoch-millisecond range"
+  (let [millis (inst-ms value)
+        text (pr-str value)]
+    ;; EDN readers share four-digit Gregorian years, not Date's entire numeric
+    ;; range. Before 1582-10-15 the JVM printer's hybrid calendar disagrees with
+    ;; JavaScript's proleptic Gregorian calendar; year 10000 is not readable EDN.
+    (when-not (and (finite? millis) (<= -12219292800000 millis 253402300799999))
+      (throw (ex-info "Instant is outside the portable Gregorian EDN range (1582-10-15 through 9999)"
                       {:clio/error :clio.canonical/invalid-instant})))
     ;; Inst is extensible on the JVM. java.time.Instant and arbitrary protocol
     ;; implementations print as #object, which cannot be persisted in this EDN
     ;; ledger. Admit the standard #inst representation, not every Inst object.
-    (when-not (str/starts-with? (pr-str value) "#inst \"")
+    (when-not (str/starts-with? text "#inst \"")
       (throw (ex-info "Instant must have the standard EDN tagged representation"
                       {:clio/error :clio.canonical/unsupported-value})))
+    ;; Inst is extensible. The standard tag alone does not prove a custom
+    ;; printer preserved the value. Validate the exact bytes admission writes.
+    (when-not (try (= millis (inst-ms (edn/read-one text)))
+                  (catch #?(:clj Exception :cljs :default) _ false))
+      (throw (ex-info "Instant does not round trip through tagged EDN"
+                      {:clio/error :clio.canonical/invalid-instant})))
     [:inst (canonical-number millis)]))
 
 (defn canonical-form

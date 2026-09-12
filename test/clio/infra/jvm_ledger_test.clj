@@ -97,6 +97,34 @@
   (is (= :clio.canonical/unsupported-value
          (error-code #(canonical/canonical-edn (support/arbitrary-object))))))
 
+(deftest schema-rename-forces-the-directory-before-acknowledgement
+  (with-ledger
+    (fn [{:keys [directory]}]
+      (let [from (str directory "/pending.edn")
+            to (str directory "/committed.edn")
+            synchronize! fs/sync-directory!
+            observations (atom [])]
+        (fs/write-text! from "{:schema :new}")
+        (with-redefs [fs/sync-directory!
+                      (fn [path]
+                        (swap! observations conj [(fs/exists? from) (fs/exists? to)])
+                        (synchronize! path))]
+          (is (= to (fs/rename! from to))))
+        (is (= [[true false] [false true]] @observations))
+        (is (= "{:schema :new}" (fs/read-text to)))))))
+
+(deftest unsupported-directory-sync-refuses-before-changing-schema-paths
+  (with-ledger
+    (fn [{:keys [directory]}]
+      (let [from (str directory "/pending.edn") to (str directory "/committed.edn")]
+        (fs/write-text! from "{:schema :new}")
+        (with-redefs [fs/sync-directory!
+                      (fn [_] (throw (ex-info "unsupported directory force"
+                                              {:clio/error :clio.fs/directory-sync-unavailable})))]
+          (is (= :clio.fs/directory-sync-unavailable (error-code #(fs/rename! from to)))))
+        (is (fs/exists? from))
+        (is (not (fs/exists? to)))))))
+
 (deftest node-and-jvm-share-schemas-edn-tags-and-replay
   (with-ledger
     (fn [{:keys [directory path schemas runtime]}]
@@ -114,6 +142,22 @@
                     0 reduce-amount)
                    (:projection result))))
           (finally (support/stop! peer)))))))
+
+(deftest node-replays-both-admitted-calendar-boundaries-from-jvm
+  (doseq [millis [-12219292800000 253402300799999]]
+    (with-ledger
+      (fn [{:keys [directory path schemas runtime]}]
+        (let [facts (assoc-in fixture/facts [:event/data :observed/at] (support/instant-at millis))
+              evt (:event (runtime/append! runtime path :record/observed facts))
+              output (str directory "/boundary-peer.out")
+              peer (support/start! ["nbb" "-cp" "test" "test/clio/infra/jvm_peer.nbb"
+                                    "read" schemas path] output)]
+          (try
+            (is (= 0 (support/finish! peer)) (fs/read-text output))
+            (let [result (edn/read-one (str/trim (fs/read-text output)))]
+              (is (= [evt] (:events result)))
+              (is (= millis (inst-ms (get-in result [:events 0 :event/data :observed/at])))))
+            (finally (support/stop! peer))))))))
 
 (deftest node-contender-blocks-on-jvm-inode-lock
   (with-ledger

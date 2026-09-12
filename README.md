@@ -247,6 +247,15 @@ Both adapters flush appended data (`fsync` / `FileChannel.force`) before
 returning success. Atomic rename is required for projection replacement; a
 filesystem that cannot provide it fails rather than silently downgrading.
 
+The JVM schema writer additionally forces affected parent directories after an
+atomic rename and persists newly created directory ancestry. This stronger
+directory durability contract is supported on the Linux default POSIX filesystem,
+where the adapter checks support and opens a read-only directory channel.
+Unsupported hosts or failed directory forces raise
+`:clio.fs/directory-sync-unavailable`; no successful schema publication is
+reported. A force failure after the move can leave the new path present, but
+the caller still receives failure and must not acknowledge dependent events.
+
 `clio.domain.canonicalize/canonicalize` performs:
 
 ```text
@@ -364,8 +373,13 @@ across JVM Clojure, NBB and compiled Node ClojureScript:
 Standard EDN `#uuid` and `#inst` payloads retain their types. Their canonical
 forms use lowercase UUID text and signed epoch milliseconds, respectively.
 These additions preserve all previously supported values' canonical bytes;
-they do not reinterpret an existing hash. Instants outside JavaScript Date's
-finite range are refused on both hosts. Arbitrary host objects remain invalid.
+they do not reinterpret an existing hash. The shared instant range is
+`1582-10-15T00:00:00.000Z` through `9999-12-31T23:59:59.999Z`, inclusive.
+Earlier values encounter the JVM printer's Julian/Gregorian cutover; later years
+exceed the common four-digit EDN reader grammar. Admission also checks the exact
+tagged print/read round trip. Refused values remain representable as explicit
+application strings, but cannot enter an event as canonical instants.
+Arbitrary host objects remain invalid.
 Malli's data-only predicate symbol `inst?` expresses the instant contract;
 `:inst` is not in its default registry. Use quoted symbols in authored schema
 code so persisted catalogs contain data rather than runtime function objects.

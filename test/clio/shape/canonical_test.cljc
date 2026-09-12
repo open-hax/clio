@@ -1,6 +1,8 @@
 (ns clio.shape.canonical-test
   (:require [clio.shape.canonical :as canonical]
-            #?(:cljs [clio.extern.js.canonical-fixture :as fixture])
+            [clio.shape.edn :as edn]
+            #?(:cljs [clio.extern.js.canonical-fixture :as fixture]
+               :clj [clio.extern.jvm.test-support :as fixture])
             #?(:clj [clojure.test :refer [deftest is]]
                :cljs [cljs.test :refer [deftest is]])))
 
@@ -48,6 +50,16 @@
          (error-code #(canonical/canonical-edn {:nan ##NaN}))))
   (is (= :clio.canonical/non-portable-number
          (error-code #(canonical/canonical-edn {:inf ##Inf})))))
+
+(deftest only-round-trippable-gregorian-instants-are-admitted
+  (doseq [millis [-12219292800000 -1 0 253402300799999]]
+    (let [value (fixture/instant-at millis)
+          reread (edn/read-one (pr-str value))]
+      (is (= millis (inst-ms reread)))
+      (is (= (canonical/canonical-edn value) (canonical/canonical-edn reread)))))
+  (doseq [millis [-12219292800001 -14831769600000 253402300800000 8640000000000000]]
+    (is (= :clio.canonical/invalid-instant
+           (error-code #(canonical/canonical-edn (fixture/instant-at millis)))))))
 
 #?(:clj
    (deftest jvm-only-exact-reals-are-refused

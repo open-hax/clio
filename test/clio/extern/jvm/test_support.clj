@@ -44,3 +44,4 @@
 (defn invalid-instant [] (java.util.Date. Long/MAX_VALUE))
 (defn non-edn-instant [] (java.time.Instant/now))
 (defn arbitrary-object [] (Object.))
+(defn instant-at [millis] (java.util.Date. (long millis)))
