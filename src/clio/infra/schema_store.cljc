@@ -1,8 +1,11 @@
 (ns clio.infra.schema-store
   (:require [clio.domain.schema :as schema]
-            [clio.extern.js.crypto :as crypto]
-            [clio.extern.js.fs :as fs]
-            [clio.extern.js.runtime :as runtime]
+            #?(:clj [clio.extern.jvm.crypto :as crypto]
+               :cljs [clio.extern.js.crypto :as crypto])
+            #?(:clj [clio.extern.jvm.fs :as fs]
+               :cljs [clio.extern.js.fs :as fs])
+            #?(:clj [clio.extern.jvm.runtime :as runtime]
+               :cljs [clio.extern.js.runtime :as runtime])
             [clio.shape.edn :as edn]
             [clojure.string :as str]))
 
@@ -18,7 +21,7 @@
   [path]
   (try
     (edn/read-one (fs/read-text path))
-    (catch :default cause
+    (catch #?(:clj Exception :cljs :default) cause
       (fail! :clio.schema-store/invalid-edn
              "Schema snapshot must contain exactly one readable EDN form"
              {:path path :cause (str cause)}))))

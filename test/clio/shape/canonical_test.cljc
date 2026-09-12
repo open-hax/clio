@@ -1,5 +1,6 @@
 (ns clio.shape.canonical-test
   (:require [clio.shape.canonical :as canonical]
+            #?(:cljs [clio.extern.js.canonical-fixture :as fixture])
             #?(:clj [clojure.test :refer [deftest is]]
                :cljs [cljs.test :refer [deftest is]])))
 
@@ -18,6 +19,27 @@
 (deftest equal-sequential-collections-share-one-preimage
   (is (= (canonical/canonical-edn [1 2 3])
          (canonical/canonical-edn '(1 2 3)))))
+
+(deftest standard-edn-tags-have-portable-preimages
+  (is (= "[:uuid \"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\"]"
+         (canonical/canonical-edn #uuid "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")))
+  (is (= "[:inst [:number :safe-integer \"0\"]]"
+         (canonical/canonical-edn #inst "1970-01-01T00:00:00.000Z")))
+  (is (= "[:inst [:number :safe-integer \"-1\"]]"
+         (canonical/canonical-edn #inst "1969-12-31T23:59:59.999Z")))
+  (is (= (canonical/canonical-edn #inst "2026-09-11T00:00:00.001Z")
+         (canonical/canonical-edn #inst "2026-09-11T02:00:00.001+02:00")))
+  (is (not= (canonical/canonical-edn #uuid "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+            (canonical/canonical-edn "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")))
+  (is (not= (canonical/canonical-edn #inst "1970-01-01T00:00:00.000Z")
+            (canonical/canonical-edn 0))))
+
+#?(:cljs
+   (deftest invalid-dates-and-host-objects-are-refused
+     (is (= :clio.canonical/invalid-instant
+            (error-code #(canonical/canonical-edn (fixture/invalid-instant)))))
+     (is (= :clio.canonical/unsupported-value
+            (error-code #(canonical/canonical-edn (fixture/arbitrary-object)))))))
 
 (deftest nonportable-numbers-are-refused
   (is (= :clio.canonical/non-portable-number

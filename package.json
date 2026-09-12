@@ -1,7 +1,7 @@
 {
   "name": "@eta-mu/clio",
   "version": "0.1.0",
-  "description": "Content-addressed event sourcing kernel for ClojureScript and NBB",
+  "description": "Content-addressed event sourcing kernel for Clojure, ClojureScript and NBB",
   "type": "module",
   "license": "LGPL-3.0-or-later",
   "bin": {
@@ -19,7 +19,8 @@
     "nbb": "1.3.201"
   },
   "scripts": {
-    "test": "pnpm run test:bb && pnpm run test:nbb && pnpm run test:shadow",
+    "test": "pnpm run test:bb && pnpm run test:jvm && pnpm run test:nbb && pnpm run test:shadow",
+    "test:jvm": "clojure -M:test",
     "test:bb": "bb test/run.bb",
     "test:nbb": "nbb -cp test:scripts test/run.nbb",
     "test:shadow": "pnpm dlx shadow-cljs@3.4.11 compile test",

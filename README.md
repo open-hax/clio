@@ -156,8 +156,11 @@ law -> shape -> extern -> domain -> infra
 - `clio.extern.js.*` — the only Clio namespace family that touches Node/JS
   libraries or builtins. Functions accept Clojure data and return Clojure data;
   Node handles and JS option objects stay inside the boundary (`.cljs`).
-- `clio.infra.*` — NBB/Node orchestration over the pure kernel and boundary
-  functions (`.cljs`).
+- `clio.extern.jvm.*` — JVM filesystem, SHA-256, UUID and wall-clock adapters
+  (`.clj`). File channels and kernel locks remain private to this boundary.
+- `clio.infra.*` — shared event, ledger, schema-history and projection
+  orchestration (`.cljc`), selecting host adapters with reader conditionals.
+  The CLI alone remains Node-specific (`.cljs`).
 - `bin/*.nbb` and `test/*.nbb` — thin NBB executable entrypoints only.
 - `bin/clio.mjs` — the published npm executable. It is a launcher, not logic:
   see [Consuming from npm](#consuming-from-npm).
@@ -231,6 +234,18 @@ therefore drop a held lock silently, so `clio.extern.js.fs` tracks the paths
 this process has locked and refuses that read outright; callers inside a
 critical section use `read-locked-text`. The guard keys on the path while the
 lock keys on the inode, so a hard-link alias under another name is not caught.
+
+The JVM adapter uses `FileChannel.lock` on the same existing inode. On Unix
+this participates in the Node adapter's authoritative POSIX record-lock
+protocol; mixed JVM/Node writers therefore share admission and collision
+semantics. An in-process JVM guard serializes descriptor acquisition before
+opening files, and refuses path reads through hard-link aliases while locked.
+This intentionally trades concurrency for simpler local development behavior.
+Filesystems without stable file identity are rejected instead of substituting
+path identity, which would make hard-link aliases unsafe.
+Both adapters flush appended data (`fsync` / `FileChannel.force`) before
+returning success. Atomic rename is required for projection replacement; a
+filesystem that cannot provide it fails rather than silently downgrading.
 
 `clio.domain.canonicalize/canonicalize` performs:
 
@@ -312,6 +327,49 @@ actually requires — the same versions this repository builds and tests against
 Under Shadow CLJS, add them to `:dependencies`; under NBB, note that edamame and
 promesa are bundled with nbb, so only Malli needs declaring, as `nbb.edn` shows.
 
+## Consuming from JVM Clojure
+
+Use the same package as a local dependency; there is no second ledger package:
+
+```clojure
+{:deps {open-hax/clio {:local/root "../eta-mu/packages/clio"}}}
+```
+
+The event, schema-store, ledger, runtime and projection APIs are identical
+across JVM Clojure, NBB and compiled Node ClojureScript:
+
+```clojure
+(require '[clio.infra.runtime :as runtime]
+         '[clio.infra.ledger :as ledger]
+         '[clio.law.schema :as schema])
+
+(def catalog
+  {:note/recorded
+   (schema/event-schema
+    :note/recorded
+    [:map {:closed true} [:note/id :uuid] [:observed/at 'inst?] [:text :string]])})
+
+(ledger/create-ledger! "events.edn") ; Explicit, exclusive creation; run once.
+(def rt (runtime/open ".clio/schemas" catalog))
+(runtime/append!
+ rt "events.edn" :note/recorded
+ {:event/stream "note:1" :event/seq 1 :event/causes []
+  :event/actor "developer" :event/subject "note:1"
+  :event/data {:note/id #uuid "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+               :observed/at #inst "2026-09-11T00:00:00.000Z"
+               :text "Recorded locally"}})
+(ledger/canonicalize-files (:schema/revisions rt) ["events.edn"])
+```
+
+Standard EDN `#uuid` and `#inst` payloads retain their types. Their canonical
+forms use lowercase UUID text and signed epoch milliseconds, respectively.
+These additions preserve all previously supported values' canonical bytes;
+they do not reinterpret an existing hash. Instants outside JavaScript Date's
+finite range are refused on both hosts. Arbitrary host objects remain invalid.
+Malli's data-only predicate symbol `inst?` expresses the instant contract;
+`:inst` is not in its default registry. Use quoted symbols in authored schema
+code so persisted catalogs contain data rather than runtime function objects.
+
 ## Verification
 
 ```bash
@@ -319,10 +377,12 @@ pnpm --dir packages/clio lint
 pnpm --dir packages/clio test
 ```
 
-The kernel suite runs under both NBB and Shadow CLJS. A third Babashka runner
-(`test/run.bb`) pins what only a JVM runtime can: that canonical encoding is
-byte-identical across hosts. The boundary-lint rules are runtime-neutral and run
-under all three. Its
+The kernel suite runs under NBB, Shadow CLJS and JVM Clojure. The lightweight
+Babashka runner (`test/run.bb`) also pins the portable canonical and admission
+laws. JVM integration tests start actual NBB peers: each host blocks while
+the other owns the ledger inode, a colliding writer observes the committed
+winner, and both hosts reproduce identical schema roots and typed projections.
+The boundary-lint rules are runtime-neutral and run under all four. Its
 partition-invariance
 fixture exhaustively checks all 24 permutations of four causally related events
 across all `3^4 = 81` assignments to three physical ledgers: 1,944 distinct

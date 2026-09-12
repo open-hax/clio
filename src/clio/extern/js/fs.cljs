@@ -169,9 +169,10 @@
   (fs/readFileSync fd "utf8"))
 
 (defn append-locked-text!
-  "Append through the descriptor that owns the kernel lock."
+  "Append and fsync through the descriptor that owns the kernel lock."
   [{:lock/keys [fd path]} text]
   (fs/appendFileSync fd text "utf8")
+  (fs/fsyncSync fd)
   path)
 
 (defn release-lock!

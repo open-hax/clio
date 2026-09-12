@@ -1,0 +1,31 @@
+#!/usr/bin/env nbb
+
+(ns clio.infra.jvm-peer
+  (:require [clio.extern.js.fs :as fs]
+            [clio.extern.js.process :as process]
+            [clio.infra.host-fixture :as fixture]
+            [clio.infra.ledger :as ledger]
+            [clio.infra.projection :as projection]
+            [clio.infra.runtime :as runtime]
+            [clio.shape.edn :as edn]))
+
+(let [[command schema-directory ledger-file ready-file event-text] *command-line-args*
+      rt (runtime/open schema-directory fixture/catalog)]
+  (case command
+    "append"
+    (do
+      (fs/write-text! ready-file "ready")
+      (try
+        (println (ledger/append-event! (:schema/revisions rt) ledger-file
+                                       (edn/read-one event-text)))
+        (catch :default cause
+          (println (:clio/error (ex-data cause)))
+          (process/exit! 1))))
+    "read"
+    (let [history (ledger/canonicalize-files (:schema/revisions rt) [ledger-file])]
+      (println (pr-str {:root (get-in rt [:schema/current :schema/root])
+                       :events (:canonical/events history)
+                       :projection (projection/build
+                                    history 0
+                                    (fn [state evt]
+                                      (+ state (get-in evt [:event/data :amount]))))})))))

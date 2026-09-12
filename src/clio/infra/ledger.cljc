@@ -1,7 +1,8 @@
 (ns clio.infra.ledger
   (:require [clio.domain.canonicalize :as canonicalize]
             [clio.domain.schema :as schema]
-            [clio.extern.js.fs :as fs]
+            #?(:clj [clio.extern.jvm.fs :as fs]
+               :cljs [clio.extern.js.fs :as fs])
             [clio.law.ledger :as ledger-law]
             [clio.shape.edn :as edn]
             [clojure.string :as str]))
@@ -24,7 +25,7 @@
         (fn [[index line]]
           (try
             (edn/read-one line)
-            (catch :default cause
+            (catch #?(:clj Exception :cljs :default) cause
               (fail! :clio.ledger/invalid-edn
                      "Ledger line must contain exactly one readable EDN form"
                      {:path path

@@ -1,4 +1,5 @@
-(ns clio.shape.canonical)
+(ns clio.shape.canonical
+  (:require [clojure.string :as str]))
 
 (declare canonical-form)
 
@@ -146,6 +147,31 @@
     :else
     (canonical-real value)))
 
+(defn- canonical-uuid
+  [value]
+  (let [text (str/lower-case (str value))]
+    (when-not (re-matches #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" text)
+      (throw (ex-info "UUID must contain exactly 128 readable bits"
+                      {:clio/error :clio.canonical/invalid-uuid})))
+    [:uuid text]))
+
+(defn- canonical-instant
+  [value]
+  (let [millis (inst-ms value)]
+    ;; JavaScript Date's supported range is narrower than a safe integer or
+    ;; java.util.Date. Reject wider JVM instants rather than assigning a root
+    ;; whose value a Node reader cannot represent. Invalid JS dates yield NaN.
+    (when-not (and (finite? millis) (<= -8640000000000000 millis 8640000000000000))
+      (throw (ex-info "Instant is outside the portable epoch-millisecond range"
+                      {:clio/error :clio.canonical/invalid-instant})))
+    ;; Inst is extensible on the JVM. java.time.Instant and arbitrary protocol
+    ;; implementations print as #object, which cannot be persisted in this EDN
+    ;; ledger. Admit the standard #inst representation, not every Inst object.
+    (when-not (str/starts-with? (pr-str value) "#inst \"")
+      (throw (ex-info "Instant must have the standard EDN tagged representation"
+                      {:clio/error :clio.canonical/unsupported-value})))
+    [:inst (canonical-number millis)]))
+
 (defn canonical-form
   "Convert supported Clojure data into a deterministically ordered semantic
    form suitable for cross-runtime hashing. Equal sequential collections share
@@ -161,6 +187,8 @@
     (string? value) [:string value]
     (keyword? value) [:keyword (namespace value) (name value)]
     (symbol? value) [:symbol (namespace value) (name value)]
+    (uuid? value) (canonical-uuid value)
+    (inst? value) (canonical-instant value)
     (number? value) (canonical-number value)
     (map? value) (canonical-map value)
     (set? value) (canonical-set value)
