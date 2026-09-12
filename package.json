@@ -16,16 +16,19 @@
   ],
   "dependencies": {
     "fs-ext-extra-prebuilt": "2.2.9",
-    "nbb": "1.3.201"
+    "nbb": "1.5.212"
   },
   "scripts": {
     "test": "pnpm run test:bb && pnpm run test:jvm && pnpm run test:nbb && pnpm run test:shadow",
     "test:jvm": "clojure -M:test",
     "test:bb": "bb test/run.bb",
     "test:nbb": "nbb -cp test:scripts test/run.nbb",
-    "test:shadow": "pnpm dlx shadow-cljs@3.4.11 compile test",
+    "test:shadow": "pnpm exec shadow-cljs compile test",
     "lint": "pnpm run lint:kondo",
     "lint:kondo": "clj-kondo --lint src test bin scripts && bb scripts/lint_extern_boundary.bb",
     "clean": "rm -rf target .nbb"
+  },
+  "devDependencies": {
+    "shadow-cljs": "3.4.11"
   }
 }
