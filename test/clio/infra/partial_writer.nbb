@@ -1,0 +1,29 @@
+#!/usr/bin/env nbb
+
+(ns clio.infra.partial-writer
+  (:require [clio.extern.js.fs :as fs]
+            [clio.extern.js.process :as process]))
+
+(defn wait-for-reader!
+  "Bound the fixture while waiting for the reader to enter its filesystem boundary."
+  [path]
+  (let [deadline (+ (process/now-ms) 20000)]
+    (loop []
+      (cond
+        (fs/exists? path) nil
+        (> (process/now-ms) deadline)
+        (throw (ex-info "Reader never reached the ledger" {:path path}))
+        :else (do (process/sleep-until! (+ (process/now-ms) 10)) (recur))))))
+
+(let [[ledger-file partial-ready reader-ready event-text] *command-line-args*
+      split (quot (count event-text) 2)
+      lock (fs/acquire-lock! ledger-file)]
+  (try
+    (fs/append-locked-text! lock (subs event-text 0 split))
+    (fs/write-text! partial-ready "partial")
+    (wait-for-reader! reader-ready)
+    ;; The reader has reached the real file operation. Leave the invalid final
+    ;; line visible while still owning both native Node and POSIX inode locks.
+    (process/sleep-until! (+ (process/now-ms) 250))
+    (fs/append-locked-text! lock (str (subs event-text split) "\n"))
+    (finally (fs/release-lock! lock))))

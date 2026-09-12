@@ -12,6 +12,19 @@
 (let [[command schema-directory ledger-file ready-file event-text] *command-line-args*
       rt (runtime/open schema-directory fixture/catalog)]
   (case command
+    "read-single"
+    (let [read-text fs/read-text
+          acquire-lock! fs/acquire-lock!
+          signal! (fn [path]
+                    (when (= ledger-file path)
+                      (fs/write-text! ready-file "reading")))]
+      (with-redefs [fs/read-text (fn [path] (signal! path) (read-text path))
+                    fs/acquire-lock! (fn [path] (signal! path) (acquire-lock! path))]
+        (try
+          (println (pr-str {:events (ledger/read-ledger ledger-file)}))
+          (catch :default cause
+            (println (pr-str {:error (:clio/error (ex-data cause))}))
+            (process/exit! 1)))))
     "append"
     (do
       (fs/write-text! ready-file "ready")

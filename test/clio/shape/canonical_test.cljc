@@ -22,6 +22,24 @@
   (is (= (canonical/canonical-edn [1 2 3])
          (canonical/canonical-edn '(1 2 3)))))
 
+(deftest identifiers-must-round-trip-through-the-persisted-edn
+  (doseq [value [(keyword "bad key") (keyword "bad\nkey")
+                 (keyword "bad]key") (keyword "")
+                 (keyword "bad namespace" "key")
+                 (keyword nil "a/b")
+                 (symbol "bad key") (symbol "bad]key")
+                 (symbol "") (symbol "nil") (symbol "true")
+                 (symbol "12") (symbol "bad namespace" "key")
+                 (symbol nil "a/b")]]
+    (is (= :clio.canonical/invalid-identifier
+           (error-code #(canonical/canonical-edn {:nested [value]})))
+        (pr-str value)))
+  (doseq [value [:plain :namespace/name :with-hyphen :with.dot
+                 (keyword "λ") (symbol "/") 'namespace/name 'with-hyphen '+]]
+    (is (= [(if (keyword? value) :keyword :symbol) (namespace value) (name value)]
+           (canonical/canonical-form value)))
+    (is (= value (edn/read-one (pr-str value))))))
+
 (deftest standard-edn-tags-have-portable-preimages
   (is (= "[:uuid \"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\"]"
          (canonical/canonical-edn #uuid "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")))

@@ -180,6 +180,19 @@
                       {:clio/error :clio.canonical/invalid-instant})))
     [:inst (canonical-number millis)]))
 
+(defn- canonical-identifier
+  [tag value]
+  (when-not
+   (try
+     (let [reread (edn/read-one (pr-str value))]
+       (and ((if (= tag :keyword) keyword? symbol?) reread)
+            (= (namespace value) (namespace reread))
+            (= (name value) (name reread))))
+     (catch #?(:clj Exception :cljs :default) _ false))
+    (throw (ex-info "Identifier does not round trip through persisted EDN"
+                    {:clio/error :clio.canonical/invalid-identifier})))
+  [tag (namespace value) (name value)])
+
 (defn canonical-form
   "Convert supported Clojure data into a deterministically ordered semantic
    form suitable for cross-runtime hashing. Equal sequential collections share
@@ -193,8 +206,8 @@
     (nil? value) [:nil]
     (boolean? value) [:boolean value]
     (string? value) [:string value]
-    (keyword? value) [:keyword (namespace value) (name value)]
-    (symbol? value) [:symbol (namespace value) (name value)]
+    (keyword? value) (canonical-identifier :keyword value)
+    (symbol? value) (canonical-identifier :symbol value)
     (uuid? value) (canonical-uuid value)
     (inst? value) (canonical-instant value)
     (number? value) (canonical-number value)

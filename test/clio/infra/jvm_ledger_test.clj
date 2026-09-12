@@ -238,3 +238,59 @@
                 "JVM must wait for Node's fcntl inode lock"))
           (is (= 0 (support/finish! peer)) (fs/read-text output))
           (finally (support/stop! peer)))))))
+
+(deftest jvm-single-reader-waits-for-node-to-complete-its-locked-append
+  (with-ledger
+    (fn [{:keys [directory path runtime]}]
+      (let [fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+            partial-ready (str directory "/partial-ready")
+            reader-ready (str directory "/reader-ready")
+            output (str directory "/writer.out")
+            peer (support/start! ["nbb" "-cp" "test" "test/clio/infra/partial_writer.nbb"
+                                  path partial-ready reader-ready (pr-str fact)] output)
+            read-text fs/read-text
+            acquire-lock! fs/acquire-lock!
+            signal! (fn [candidate]
+                      (when (= path candidate)
+                        (fs/write-text! reader-ready "reading")))]
+        (try
+          (support/wait-for-path! partial-ready)
+          (let [started (support/now-ms)
+                result (with-redefs [fs/read-text (fn [candidate]
+                                                   (signal! candidate) (read-text candidate))
+                                    fs/acquire-lock! (fn [candidate]
+                                                       (signal! candidate) (acquire-lock! candidate))]
+                         (try {:events (ledger/read-ledger path)}
+                              (catch Exception cause {:error (:clio/error (ex-data cause))})))]
+            (is (= {:events [fact]} result)
+                "The public singular reader must not parse a writer's incomplete final line")
+            (is (>= (- (support/now-ms) started) 200)
+                "Reading waits until the peer completes its append and releases the inode"))
+          (is (= 0 (support/finish! peer)) (fs/read-text output))
+          (is (= [fact] (ledger/read-ledger path)))
+          (finally (support/stop! peer)))))))
+
+(deftest node-single-reader-waits-for-jvm-to-complete-its-locked-append
+  (with-ledger
+    (fn [{:keys [directory path schemas runtime]}]
+      (let [fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+            text (pr-str fact)
+            split (quot (count text) 2)
+            ready (str directory "/reader-ready")
+            output (str directory "/reader.out")
+            lock (fs/acquire-lock! path)
+            peer (atom nil)]
+        (try
+          (try
+            (fs/append-locked-text! lock (subs text 0 split))
+            (reset! peer (support/start! ["nbb" "-cp" "test" "test/clio/infra/jvm_peer.nbb"
+                                         "read-single" schemas path ready] output))
+            (support/wait-for-path! ready)
+            (is (not (support/exited? @peer 250))
+                "Node's singular reader must wait on the JVM's actual POSIX inode lock")
+            (fs/append-locked-text! lock (str (subs text split) "\n"))
+            (finally (fs/release-lock! lock)))
+          (is (= 0 (support/finish! @peer)) (fs/read-text output))
+          (is (= {:events [fact]} (edn/read-one (str/trim (fs/read-text output)))))
+          (is (= [fact] (ledger/read-ledger path)))
+          (finally (when @peer (support/stop! @peer))))))))

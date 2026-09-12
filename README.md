@@ -388,6 +388,12 @@ exceed the common four-digit EDN reader grammar. Admission also checks the exact
 tagged print/read round trip. Refused values remain representable as explicit
 application strings, but cannot enter an event as canonical instants.
 Arbitrary host objects remain invalid.
+Keyword and symbol constructors can also produce names that their EDN printer
+cannot preserve. Admission requires the printed identifier to read back as
+exactly one value of the same kind, namespace and name. Whitespace, delimiters,
+reserved symbol literals and ambiguous constructor namespaces are refused
+before append; valid identifiers retain their existing canonical bytes. This
+also protects generic JavaScript records whose property names become keywords.
 Malli's data-only predicate symbol `inst?` expresses the instant contract;
 `:inst` is not in its default registry. Use quoted symbols in authored schema
 code so persisted catalogs contain data rather than runtime function objects.

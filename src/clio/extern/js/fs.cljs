@@ -61,19 +61,25 @@
    for that file, not only the one that took the lock. So opening a locked
    ledger a second time by path and closing it drops the lock silently — no
    error, no signal, just an unserialized critical section. read-text refuses
-   such a path rather than letting that happen.
+   such a path rather than letting that happen. Recorded device/inode identities
+   also refuse aliases before opening another descriptor."
+  (atom {}))
 
-   The guard keys on the path while the lock keys on the inode, so a hard-link
-   alias reaching the same inode under another name is not caught. Callers
-   inside a critical section must use read-locked-text regardless."
-  (atom #{}))
+(defn- stat-identity [^js stat]
+  [(str (.-dev stat)) (str (.-ino stat))])
+
+(defn- refuse-locked-path! [path]
+  (when (and (seq @locked-paths)
+             (or (contains? @locked-paths path)
+                 (let [identity (stat-identity (fs/statSync path #js {:bigint true}))]
+                   (some #(= identity %) (vals @locked-paths)))))
+    (throw (ex-info
+            "Path is locked by this process; read through read-locked-text"
+            {:path path :clio/error :clio.fs/locked-path-read}))))
 
 (defn read-text
   [path]
-  (when (contains? @locked-paths path)
-    (throw (ex-info
-            "Path is locked by this process; read through read-locked-text"
-            {:path path :clio/error :clio.fs/locked-path-read})))
+  (refuse-locked-path! path)
   (fs/readFileSync path "utf8"))
 
 (defn append-text!
@@ -198,11 +204,12 @@
    here and appended to as an empty history. create-ledger! is the only
    creation path; an absent ledger fails with ENOENT."
   [path]
+  (refuse-locked-path! path)
   (let [flags (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs)))
         fd (.openSync fs path flags)]
     (try
       (acquire-native-lock! fd)
-      (swap! locked-paths conj path)
+      (swap! locked-paths assoc path (stat-identity (fs/fstatSync fd #js {:bigint true})))
       {:lock/path path :lock/fd fd}
       (catch :default cause
         (fs/closeSync fd)
@@ -231,6 +238,6 @@
 (defn release-lock!
   "Close the owning descriptor. Kernel file locks are released by close."
   [{:lock/keys [fd path]}]
-  (swap! locked-paths disj path)
+  (swap! locked-paths dissoc path)
   (fs/closeSync fd)
   nil)

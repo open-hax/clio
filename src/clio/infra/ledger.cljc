@@ -32,11 +32,20 @@
                       :line (inc index)
                       :cause (str cause)})))))))
 
+(defn- read-existing-ledger!
+  "Capture and parse one complete immutable snapshot through its owning descriptor."
+  [path]
+  (let [lock (fs/acquire-lock! path)]
+    (try
+      (parse-ledger-text path (fs/read-locked-text lock))
+      (finally (fs/release-lock! lock)))))
+
 (defn read-ledger
+  "Inspect one ledger under its writer lock; an absent optional ledger remains empty."
   [path]
   (if-not (fs/exists? path)
     []
-    (parse-ledger-text path (fs/read-text path))))
+    (read-existing-ledger! path)))
 
 (defn- append-record!
   [lock existing-text event]
@@ -116,12 +125,7 @@
    this does not imply one atomic transaction across separate partition files."
   [paths]
   (doseq [path paths] (require-ledger-path! path))
-  (mapv (fn [path]
-          (let [lock (fs/acquire-lock! path)]
-            (try
-              (parse-ledger-text path (fs/read-locked-text lock))
-              (finally (fs/release-lock! lock)))))
-        paths))
+  (mapv read-existing-ledger! paths))
 
 (defn canonicalize-files
   [revisions paths]
