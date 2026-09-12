@@ -107,7 +107,7 @@
   [^FileChannel channel text]
   (let [buffer (ByteBuffer/wrap (.getBytes ^String text StandardCharsets/UTF_8))]
     (while (.hasRemaining buffer) (.write channel buffer))
-    (.force channel true)))
+    (force-file! channel)))
 
 (defn write-text! [path text]
   (with-process-guard
@@ -214,6 +214,13 @@
   (let [{:keys [^FileChannel channel path]} (lock-entry token)]
     (.position channel (.size channel))
     (write-buffer! channel text)
+    path))
+
+(defn sync-locked!
+  "Reflush visible ledger bytes through the channel that still owns its lock."
+  [token]
+  (let [{:keys [channel path]} (lock-entry token)]
+    (force-file! channel)
     path))
 
 (defn release-lock!

@@ -220,6 +220,12 @@
   (.fsyncSync fs fd)
   path)
 
+(defn sync-locked!
+  "Reflush visible ledger bytes through the descriptor that still owns its lock."
+  [{:lock/keys [fd path]}]
+  (.fsyncSync fs fd)
+  path)
+
 (defn release-lock!
   "Close the owning descriptor. Kernel file locks are released by close."
   [{:lock/keys [fd path]}]

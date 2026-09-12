@@ -1,6 +1,10 @@
 (ns clio.infra.jvm-durability-retry-test
   (:require [clio.extern.jvm.fs :as fs]
             [clio.extern.jvm.runtime :as host]
+            [clio.infra.event :as event]
+            [clio.infra.host-fixture :as fixture]
+            [clio.infra.ledger :as ledger]
+            [clio.infra.runtime :as runtime]
             [clojure.test :refer [deftest is]]))
 
 (deftest retry-forces-existing-ancestry-after-interrupted-directory-creation
@@ -27,6 +31,34 @@
         (is (= leaf (fs/ensure-dir! leaf))))
       (is (every? (set @observed*) [leaf parent root "/tmp" "/"])
           "A retry must force already-created directories and their parent entries")
+      (finally (fs/remove-tree! root)))))
+
+(deftest visible-event-retries-must-force-the-owning-channel-again
+  (let [root (str "/tmp/clio-event-retry-" (host/random-uuid))
+        path (str root "/events.edn")
+        forced (atom 0)]
+    (try
+      (fs/ensure-dir! root)
+      (ledger/create-ledger! path)
+      (let [runtime (runtime/open (str root "/schemas") fixture/catalog)
+            revisions (:schema/revisions runtime)
+            fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+            original-force! fs/force-file!]
+        (with-redefs [fs/force-file! (fn [_] (swap! forced inc)
+                                      (throw (ex-info "Injected event force failure" {})))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/append-event! revisions path fact)))
+          (is (= [fact] (ledger/read-ledger path)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/append-event! revisions path fact)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/ensure-durable! revisions path)))
+          (is (= 3 @forced)))
+        (with-redefs [fs/force-file! (fn [channel] (swap! forced inc) (original-force! channel))]
+          (is (= :already-present (ledger/append-event! revisions path fact)))
+          (is (= path (ledger/ensure-durable! revisions path))))
+        (is (= 5 @forced))
+        (is (= [fact] (ledger/read-ledger path))))
       (finally (fs/remove-tree! root)))))
 
 (deftest empty-ledger-forces-the-created-inode-before-the-parent

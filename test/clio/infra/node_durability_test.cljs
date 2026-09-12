@@ -4,6 +4,7 @@
             [clio.extern.js.fs :as fs]
             [clio.extern.js.fs-observer :as observer]
             [clio.extern.js.runtime :as host]
+            [clio.infra.event :as event]
             [clio.infra.host-fixture :as fixture]
             [clio.infra.ledger :as ledger]
             [clio.infra.runtime :as runtime]
@@ -105,3 +106,29 @@
           (observer/with-observer #(swap! trace conj %) #(fs/ensure-dir! leaf))
           (is (every? (set (map :path @trace)) [leaf middle directory "/tmp" "/"]))
           (is (every? :directory? @trace)))))))
+
+(deftest exact-event-retry-refuses-unflushed-visible-content
+  (with-directory
+    (fn [directory]
+      (let [path (str directory "/events.edn")
+            runtime (runtime/open (str directory "/schemas") fixture/catalog)
+            revisions (:schema/revisions runtime)
+            event (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+            attempts (atom 0)]
+        (ledger/create-ledger! path)
+        (observer/with-observer
+          (fn [operation]
+            (when (= path (:path operation))
+              (swap! attempts inc)
+              (throw (ex-info "Injected ledger fsync failure" {:clio/error :injected-sync}))))
+          (fn []
+            (is (= :injected-sync (error-code #(ledger/append-event! revisions path event))))
+            (is (= [event] (ledger/read-ledger path)) "Visibility is not a durable acknowledgment")
+            (is (= :injected-sync (error-code #(ledger/append-event! revisions path event)))
+                "An exact retry cannot acknowledge the still unflushed event")
+            (is (= 2 @attempts))))
+        (let [synced (atom [])]
+          (observer/with-observer #(swap! synced conj %)
+            #(is (= :already-present (ledger/append-event! revisions path event))))
+          (is (= [path] (mapv :path @synced)))
+          (is (= [event] (ledger/read-ledger path))))))))

@@ -78,7 +78,7 @@
               (ledger-law/append-admission events event)]
           (case verdict
             :already-present
-            :already-present
+            (do (fs/sync-locked! lock) :already-present)
 
             :id-collision
             (fail! :clio.ledger/id-collision
@@ -96,6 +96,19 @@
               :appended))))
       (finally
         (fs/release-lock! lock)))))
+
+(defn ensure-durable!
+  "Validate and reflush an existing ledger before acknowledging a projection-only retry.
+   Visible history can contain a prior append whose synchronization failed. The
+   owning lock must remain held through validation and the new durability fence."
+  [revisions path]
+  (require-ledger-path! path)
+  (let [lock (fs/acquire-lock! path)]
+    (try
+      (doseq [existing (parse-ledger-text path (fs/read-locked-text lock))]
+        (schema/validate-event! revisions existing))
+      (fs/sync-locked! lock)
+      (finally (fs/release-lock! lock)))))
 
 (defn read-ledgers
   [paths]
