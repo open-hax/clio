@@ -214,16 +214,18 @@
   (fs/readFileSync fd "utf8"))
 
 (defn append-locked-text!
-  "Append and fsync through the descriptor that owns the kernel lock."
+  "Append and force the owning inode, then its directory entry, before acknowledgment."
   [{:lock/keys [fd path]} text]
   (fs/appendFileSync fd text "utf8")
   (.fsyncSync fs fd)
+  (sync-directory! (parent-path path))
   path)
 
 (defn sync-locked!
-  "Reflush visible ledger bytes through the descriptor that still owns its lock."
+  "Reflush the locked inode and parent, including an uncertain earlier creation."
   [{:lock/keys [fd path]}]
   (.fsyncSync fs fd)
+  (sync-directory! (parent-path path))
   path)
 
 (defn release-lock!

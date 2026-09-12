@@ -98,8 +98,8 @@
         (fs/release-lock! lock)))))
 
 (defn ensure-durable!
-  "Validate and reflush an existing ledger before acknowledging a projection-only retry.
-   Visible history can contain a prior append whose synchronization failed. The
+  "Validate and reflush an existing ledger before acknowledging reopen or a no-change retry.
+   Visible history can contain a creation or append whose synchronization failed. The
    owning lock must remain held through validation and the new durability fence."
   [revisions path]
   (require-ledger-path! path)

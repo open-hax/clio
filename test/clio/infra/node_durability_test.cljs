@@ -130,5 +130,49 @@
         (let [synced (atom [])]
           (observer/with-observer #(swap! synced conj %)
             #(is (= :already-present (ledger/append-event! revisions path event))))
-          (is (= [path] (mapv :path @synced)))
+          (is (= [path directory] (mapv :path @synced)))
           (is (= [event] (ledger/read-ledger path))))))))
+
+(deftest leftover-created-ledgers-must-force-inode-and-parent-before-acknowledgment
+  (doseq [phase [:inode :parent]]
+    (with-directory
+      (fn [directory]
+        (let [path (str directory "/events.edn")
+              runtime (runtime/open (str directory "/schemas") fixture/catalog)
+              revisions (:schema/revisions runtime)
+              inode-seen? (atom false)]
+          (is (some?
+                (error-code
+                  #(observer/with-observer
+                     (fn [operation]
+                       (when (= path (:path operation)) (reset! inode-seen? true))
+                       (when (and @inode-seen?
+                                  (if (= phase :inode)
+                                    (= path (:path operation))
+                                    (= directory (:path operation))))
+                         (throw (ex-info "Injected creation force refusal" {:clio/error :injected-sync}))))
+                     (fn [] (ledger/create-ledger! path))))))
+          (is (fs/exists? path) "An uncertain creation preserves the visible inode")
+          (is (= :clio.fs/directory-sync-unavailable
+                 (error-code
+                   #(observer/with-observer
+                      (fn [operation]
+                        (when (= directory (:path operation))
+                          (throw (ex-info "Injected retry parent force refusal" {}))))
+                      (fn [] (ledger/ensure-durable! revisions path)))))
+              "A validated empty ledger cannot bypass a failed parent fence")
+          (let [trace (atom [])]
+            (observer/with-observer #(swap! trace conj %)
+              #(is (= path (ledger/ensure-durable! revisions path))))
+            (is (= [path directory] (mapv :path @trace))))
+          (let [fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)]
+            (is (= :clio.fs/directory-sync-unavailable
+                   (error-code
+                     #(observer/with-observer
+                        (fn [operation]
+                          (when (= directory (:path operation))
+                            (throw (ex-info "Injected append parent force refusal" {}))))
+                        (fn [] (ledger/append-event! revisions path fact)))))
+                "New appends must preserve the parent fence too")
+            (is (= :already-present (ledger/append-event! revisions path fact)))
+            (is (= [fact] (ledger/read-ledger path)))))))))

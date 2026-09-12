@@ -88,3 +88,37 @@
                              (fs/create-exclusive! file))))
       (is (false? @parent-forced?))
       (finally (fs/remove-tree! root)))))
+
+(deftest leftover-created-ledger-must-force-the-inode-and-parent-on-retry
+  (doseq [phase [:inode :parent]]
+    (let [root (str "/tmp/clio-create-retry-" (host/random-uuid))
+          file (str root "/events.edn")
+          real-file! fs/force-file!
+          real-directory! fs/sync-directory!
+          trace (atom [])]
+      (try
+        (fs/ensure-dir! root)
+        (let [runtime (runtime/open (str root "/schemas") fixture/catalog)
+              revisions (:schema/revisions runtime)]
+          (with-redefs [fs/force-file! (fn [channel]
+                                        (if (= phase :inode)
+                                          (throw (ex-info "Injected creation refusal" {}))
+                                          (real-file! channel)))
+                        fs/sync-directory! (fn [_] (throw (ex-info "Injected creation refusal" {})))]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected creation refusal"
+                                 (ledger/create-ledger! file))))
+          (is (fs/exists? file))
+          (with-redefs [fs/sync-directory! (fn [_] (throw (ex-info "Injected retry parent refusal" {})))]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected retry parent refusal"
+                                 (ledger/ensure-durable! revisions file))))
+          (with-redefs [fs/force-file! (fn [channel] (swap! trace conj :inode) (real-file! channel))
+                        fs/sync-directory! (fn [path] (swap! trace conj path) (real-directory! path))]
+            (is (= file (ledger/ensure-durable! revisions file))))
+          (is (= [:inode root] @trace))
+          (let [fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)]
+            (with-redefs [fs/sync-directory! (fn [_] (throw (ex-info "Injected append parent refusal" {})))]
+              (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected append parent refusal"
+                                   (ledger/append-event! revisions file fact))))
+            (is (= :already-present (ledger/append-event! revisions file fact)))
+            (is (= [fact] (ledger/read-ledger file)))))
+        (finally (fs/remove-tree! root))))))

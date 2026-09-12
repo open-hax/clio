@@ -209,18 +209,20 @@
       (str (.decode (.newDecoder StandardCharsets/UTF_8) buffer)))))
 
 (defn append-locked-text!
-  "Append and force file contents to stable storage before reporting success."
+  "Append and force the owning inode, then its directory entry, before acknowledgment."
   [token text]
   (let [{:keys [^FileChannel channel path]} (lock-entry token)]
     (.position channel (.size channel))
     (write-buffer! channel text)
+    (sync-directory! (parent-path path))
     path))
 
 (defn sync-locked!
-  "Reflush visible ledger bytes through the channel that still owns its lock."
+  "Reflush the locked inode and parent, including an uncertain earlier creation."
   [token]
   (let [{:keys [channel path]} (lock-entry token)]
     (force-file! channel)
+    (sync-directory! (parent-path path))
     path))
 
 (defn release-lock!
