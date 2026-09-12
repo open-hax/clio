@@ -1,9 +1,16 @@
 (ns clio.extern.js.fs-observer
   "Observe actual Node calls while retaining the real filesystem and file descriptors."
   (:require ["node:fs" :as module-fs]
+            ["node:path" :as node-path]
             ["node:module" :refer [syncBuiltinESMExports]]))
 
 (def ^:private native (or (.-default module-fs) module-fs))
+
+(defn symbolic-link! [target link]
+  (.symlinkSync native target link))
+
+(defn relative-to-cwd [path]
+  (.relative node-path (.cwd js/process) path))
 
 (defn with-observer
   "Call observe! before each sync or rename; injected failures exercise real boundary sequencing."

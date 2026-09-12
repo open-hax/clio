@@ -3,7 +3,7 @@
   (:import [java.nio ByteBuffer]
            [java.nio.channels FileChannel FileLock]
            [java.nio.charset StandardCharsets]
-           [java.nio.file CopyOption Files LinkOption OpenOption Path Paths
+           [java.nio.file CopyOption Files LinkOption NoSuchFileException OpenOption Path Paths
             StandardCopyOption StandardOpenOption]
            [java.nio.file.attribute BasicFileAttributes FileAttribute]
            [java.util UUID]
@@ -16,6 +16,14 @@
 
 (defn- nio-path ^Path [path]
   (Paths/get ^String path (make-array String 0)))
+
+(defn absolute-path
+  "Resolve the existing target through the filesystem, preserving link/.. semantics."
+  [path]
+  (str (.toRealPath (nio-path path) no-links)))
+
+(defn missing-path-error? [cause]
+  (instance? NoSuchFileException cause))
 
 (defn- file-key
   [path]

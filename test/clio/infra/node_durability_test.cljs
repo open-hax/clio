@@ -21,6 +21,61 @@
 (defn- error-code [operation]
   (try (operation) nil (catch :default cause (:clio/error (ex-data cause)))))
 
+(deftest public-append-preserves-symbolic-link-parent-path-semantics
+  (doseq [relative? [false true]]
+    (with-directory
+      (fn [directory]
+        (fs/ensure-dir! (str directory "/a"))
+        (fs/ensure-dir! (str directory "/b/deep"))
+        (observer/symbolic-link! (str directory "/b/deep") (str directory "/a/link"))
+        (let [intended (str directory "/b/events.edn") lexical (str directory "/a/events.edn")
+              rt (runtime/open (str directory "/schemas") fixture/catalog)
+              supplied (str (if relative? (observer/relative-to-cwd directory) directory) "/a/link/../events.edn")]
+          (ledger/create-ledger! intended)
+          (ledger/create-ledger! lexical)
+          (let [result (runtime/append! rt supplied :record/observed fixture/facts)]
+            (is (= [(:event result)] (ledger/read-ledger intended)))
+            (is (= [] (ledger/read-ledger lexical)) "Lexical '..' normalization must not redirect an append")))))))
+
+(deftest public-append-exposes-the-exact-event-after-uncertain-durability
+  (doseq [phase [:inode :parent]]
+    (with-directory
+      (fn [directory]
+        (let [path (str directory "/events.edn")
+              rt (runtime/open (str directory "/schemas") fixture/catalog)]
+          (ledger/create-ledger! path)
+          (let [cause (try
+                        (observer/with-observer
+                          #(when (= (if (= phase :inode) path directory) (:path %))
+                             (throw (ex-info "Injected public append force failure" {:injected true})))
+                          #(runtime/append! rt path :record/observed fixture/facts))
+                        nil (catch :default error error))
+                visible (ledger/read-ledger path)
+                recovery (:clio/append-recovery (ex-data cause))]
+            (is (some? cause) "Uncertain durability remains a failure")
+            (is (= 1 (count visible)) "The actual write is already visible")
+            (is (= {:ledger/path path :event (first visible)} recovery)
+                "The public error must preserve generated UUID, timestamp and exact event")
+            (when recovery
+              (let [retry-cause (try
+                                  (observer/with-observer
+                                    #(when (= (if (= phase :inode) path directory) (:path %))
+                                       (throw (ex-info "Still refusing public retry force" {:injected true})))
+                                    #(runtime/retry-append! rt recovery))
+                                  nil (catch :default error error))
+                    trace (atom [])]
+                (is (some? retry-cause) "A persistent force failure is not acknowledged")
+                (is (= recovery (:clio/append-recovery (ex-data retry-cause))))
+                (observer/with-observer #(swap! trace conj (:path %))
+                  #(let [result (runtime/retry-append! {:schema/directory (str directory "/schemas")} recovery)]
+                     (is (= :already-present (:append/result result)))
+                     (is (= (:event recovery) (:event result)))))
+                (is (= [path directory] @trace) "Successful retry forces both durability fences")
+                (is (= visible (ledger/read-ledger path)))
+                (is (= :clio.ledger/id-collision
+                       (error-code #(runtime/retry-append! rt (assoc-in recovery [:event :event/data :amount] 8)))))
+                (is (= visible (ledger/read-ledger path)))))))))))
+
 (deftest schema-content-and-directory-entry-are-synced-before-event-acknowledgement
   (with-directory
     (fn [directory]

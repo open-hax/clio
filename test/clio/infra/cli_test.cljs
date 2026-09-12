@@ -6,9 +6,67 @@
             [clio.extern.js.process :as process]
             [clio.extern.js.runtime :as host]
             [clio.infra.ledger :as ledger]
+            [clio.infra.host-fixture :as fixture]
             [clio.infra.runtime :as runtime]
             [clio.law.schema :as schema-law]
-            [clio.shape.edn :as edn]))
+            [clio.shape.edn :as edn]
+            [clojure.string :as str]))
+
+(defn- ^:async run-command!
+  [options]
+  (let [child (cli-process/start-command! options)]
+    (try (await (cli-process/finish! child))
+         (finally (await (cli-process/stop! child))))))
+
+(defn- error-data [result]
+  (some->> (:stderr result) str/split-lines
+           (filter #(or (str/starts-with? % "{") (str/starts-with? % "#:")))
+           last edn/read-one))
+
+(defn- ^:async run-public-append-recovery!
+  []
+  (doseq [phase [:inode :parent]]
+    (let [directory (str "/tmp/clio-cli-recovery-" (host/random-uuid))
+          schema-dir (str directory "/schemas") file (str directory "/events.edn")
+          catalog-file (str directory "/catalog.edn")]
+      (try
+        (fs/ensure-dir! directory)
+        (runtime/open schema-dir fixture/catalog)
+        (ledger/create-ledger! file)
+        (fs/write-text! catalog-file (pr-str fixture/catalog))
+        (let [options {:root (process/cwd) :file file :phase phase
+                       :args ["append" schema-dir catalog-file file ":record/observed" (pr-str fixture/facts)]}
+              result (await (run-command! options))
+              visible (ledger/read-ledger file)
+              data (error-data result)
+              recovery (:clio/append-recovery data)]
+          (test/is (= 1 (:exit-code result)) (pr-str result))
+          (test/is (= "" (:stdout result)) "Failure must not publish a successful acknowledgment")
+          (test/is (= 1 (count visible)) "The child's actual append is already visible")
+          (test/is (= {:ledger/path file :event (first visible)} recovery)
+                   "The actual CLI stderr must expose exact retry EDN")
+          (when recovery
+            (let [retry-options (assoc options :args ["retry-append" schema-dir (pr-str recovery)])
+                  refused (await (run-command! retry-options))
+                  trace (str directory "/retry-trace")
+                  success (await (run-command! (assoc retry-options :phase nil :trace trace)))
+                  result (edn/read-one (:stdout success))]
+              (test/is (= 1 (:exit-code refused)) "Persistent synchronization failure is not acknowledged")
+              (test/is (= "" (:stdout refused)))
+              (test/is (= recovery (:clio/append-recovery (error-data refused))))
+              (test/is (= 0 (:exit-code success)) (pr-str success))
+              (test/is (= "" (:stderr success)))
+              (test/is (= {:append/result :already-present :event (:event recovery)} result))
+              (test/is (= ["inode" "parent"] (str/split-lines (fs/read-text trace))))
+              (test/is (= visible (ledger/read-ledger file)))
+              (let [conflict (await (run-command!
+                                     (assoc options :phase nil
+                                            :args ["retry-append" schema-dir
+                                                   (pr-str (assoc-in recovery [:event :event/data :amount] 8))])))]
+                (test/is (= 1 (:exit-code conflict)))
+                (test/is (= :clio.ledger/id-collision (:clio/error (error-data conflict))))
+                (test/is (= visible (ledger/read-ledger file)))))))
+        (finally (fs/remove-tree! directory))))))
 
 (defn- ^:async run-cli-schema-race!
   []
@@ -69,3 +127,6 @@
 
 (test/deftest cli-cleanup-closes-inherited-pipes-after-the-group-leader-exits
   (test/async done (report-cli-test! run-inherited-pipe-cleanup! done)))
+
+(test/deftest append-command-emits-exact-generated-event-for-uncertain-write-recovery
+  (test/async done (report-cli-test! run-public-append-recovery! done)))

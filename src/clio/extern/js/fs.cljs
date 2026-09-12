@@ -8,6 +8,16 @@
   [path]
   (boolean (fs/existsSync path)))
 
+(defn absolute-path
+  "Resolve the existing target through the filesystem, preserving link/.. semantics."
+  [path]
+  ;; Node's JavaScript realpath implementation normalizes '..' before walking
+  ;; links. The native resolver follows the same filesystem semantics as open.
+  (.native ^js (.-realpathSync fs) path))
+
+(defn missing-path-error? [cause]
+  (= "ENOENT" (.-code cause)))
+
 (defn sync-directory!
   "Force directory entries on the supported Linux filesystem; never acknowledge a weaker write."
   [path]

@@ -32,6 +32,15 @@
 
 (defn now-ms [] (System/currentTimeMillis))
 
+(defn symbolic-link! [target link]
+  (Files/createSymbolicLink (Paths/get ^String link (make-array String 0))
+                            (Paths/get ^String target (make-array String 0))
+                            (make-array java.nio.file.attribute.FileAttribute 0)))
+
+(defn relative-to-cwd [path]
+  (str (.relativize (.toAbsolutePath (Paths/get "" (make-array String 0)))
+                    (Paths/get ^String path (make-array String 0)))))
+
 (defn wait-for-path!
   [path]
   (let [deadline (+ (now-ms) 20000)]

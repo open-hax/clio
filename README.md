@@ -271,6 +271,22 @@ inject file and directory synchronization failures, and verify that no dependent
 event is admitted. These tests establish syscall sequencing and failure handling;
 they do not simulate physical power loss or storage hardware guarantees.
 
+An append can leave its complete event visible even though inode or directory
+synchronization failed. `runtime/append!` retains the exact generated event in
+the exception data as `:clio/append-recovery`, a map containing `:ledger/path`
+(an absolute path) and `:event`. Preserve this EDN if recovery must survive a
+process restart. After addressing the underlying failure, explicitly call
+`(runtime/retry-append! rt recovery)`. It reloads historical schema revisions
+and retries that event without generating another UUID or timestamp. An exact
+visible event returns `:already-present` only after validation and both
+durability fences succeed. Errors retain the same recovery data and their
+original cause; a token does not certify that the event was admitted.
+
+Retries still refuse changed event bytes, competing stream slots, missing
+ledgers, unknown schemas and corrupt history. A partially written EDN record
+requires explicit investigation; this API does not guess missing bytes or
+repair corruption automatically.
+
 `clio.domain.canonicalize/canonicalize` performs:
 
 ```text
@@ -315,6 +331,18 @@ npx clio append \
     :event/subject "counter:a"
     :event/data {:amount 10}}'
 ```
+
+If append fails after constructing its event, the CLI exits with status 1 and
+prints the error plus EDN data to stderr. Pass the **value** of
+`:clio/append-recovery` unchanged to the explicit recovery command:
+
+```bash
+npx clio retry-append .clio/schemas '<append-recovery-edn>'
+```
+
+This command uses the stored historical schema and event identity; it does not
+require the current catalog. Failure leaves stdout empty. Success prints the
+same `:append/result` and `:event` shape as `append`.
 
 Canonicalize arbitrarily partitioned ledgers:
 

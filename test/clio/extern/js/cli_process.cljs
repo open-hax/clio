@@ -44,6 +44,16 @@
   [root ready]
   (launch! root [(path/resolve root "test/clio/extern/js/cli_pipe_peer.cjs") ready] (.-env js/process)))
 
+(defn start-command!
+  "Run the real launcher, optionally refusing a named native ledger durability fence."
+  [{:keys [root args file phase trace]}]
+  (let [preload (path/resolve root "test/clio/extern/js/cli_sync_failure.cjs")
+        env (js/Object.assign #js {} (.-env js/process)
+                              #js {:CLIO_CLI_SYNC_PATH (or file "") :CLIO_CLI_SYNC_PHASE (or (some-> phase name) "")
+                                   :CLIO_CLI_SYNC_TRACE (or trace "")
+                                   :NODE_OPTIONS (str (or (.. js/process -env -NODE_OPTIONS) "") " --require=" (js/JSON.stringify preload))})]
+    (launch! root (into [(path/resolve root "bin/clio.mjs")] args) env)))
+
 (defn leader-exited?
   "Report only the native leader's exit, distinct from output closure."
   [^js handle]

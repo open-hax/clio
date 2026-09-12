@@ -1,11 +1,78 @@
 (ns clio.infra.jvm-durability-retry-test
   (:require [clio.extern.jvm.fs :as fs]
             [clio.extern.jvm.runtime :as host]
+            [clio.extern.jvm.test-support :as support]
             [clio.infra.event :as event]
             [clio.infra.host-fixture :as fixture]
             [clio.infra.ledger :as ledger]
             [clio.infra.runtime :as runtime]
             [clojure.test :refer [deftest is]]))
+
+(deftest public-append-preserves-symbolic-link-parent-path-semantics
+  (doseq [relative? [false true]]
+    (let [root (str "/tmp/clio-link-parent-" (host/random-uuid))]
+      (try
+        (fs/ensure-dir! (str root "/a"))
+        (fs/ensure-dir! (str root "/b/deep"))
+        (support/symbolic-link! (str root "/b/deep") (str root "/a/link"))
+        (let [intended (str root "/b/events.edn") lexical (str root "/a/events.edn")
+              rt (runtime/open (str root "/schemas") fixture/catalog)
+              supplied (str (if relative? (support/relative-to-cwd root) root) "/a/link/../events.edn")]
+          (ledger/create-ledger! intended)
+          (ledger/create-ledger! lexical)
+          (let [result (runtime/append! rt supplied :record/observed fixture/facts)]
+            (is (= [(:event result)] (ledger/read-ledger intended)))
+            (is (= [] (ledger/read-ledger lexical)) "Lexical '..' normalization must not redirect an append")))
+        (finally (fs/remove-tree! root))))))
+
+(deftest public-append-exposes-the-exact-event-after-uncertain-durability
+  (doseq [phase [:inode :parent]]
+    (let [root (str "/tmp/clio-public-recovery-" (host/random-uuid))
+          path (str root "/events.edn")
+          real-force! fs/force-file!]
+      (try
+        (fs/ensure-dir! root)
+        (ledger/create-ledger! path)
+        (let [rt (runtime/open (str root "/schemas") fixture/catalog)
+              cause (try
+                      (with-redefs [fs/force-file! (fn [channel]
+                                                   (if (= phase :inode)
+                                                     (throw (ex-info "Injected public append force failure" {:injected true}))
+                                                     (real-force! channel)))
+                                    fs/sync-directory! (fn [_] (throw (ex-info "Injected public append force failure" {:injected true})))]
+                        (runtime/append! rt path :record/observed fixture/facts))
+                      nil (catch Exception error error))
+              visible (ledger/read-ledger path)
+              recovery (:clio/append-recovery (ex-data cause))]
+          (is (some? cause) "Uncertain durability remains a failure")
+          (is (= 1 (count visible)) "The actual write is already visible")
+          (is (= {:ledger/path path :event (first visible)}
+                 recovery)
+              "The public error must preserve generated UUID, timestamp and exact event")
+          (when recovery
+            (let [retry-cause (try
+                                (with-redefs [fs/force-file! (fn [channel]
+                                                             (if (= phase :inode)
+                                                               (throw (ex-info "Still refusing public retry force" {}))
+                                                               (real-force! channel)))
+                                              fs/sync-directory! (fn [_] (throw (ex-info "Still refusing public retry force" {})))]
+                                  (runtime/retry-append! rt recovery))
+                                nil (catch Exception error error))
+                  trace (atom []) real-directory! fs/sync-directory!]
+              (is (some? retry-cause))
+              (is (= recovery (:clio/append-recovery (ex-data retry-cause))))
+              (with-redefs [fs/force-file! (fn [channel] (swap! trace conj :inode) (real-force! channel))
+                            fs/sync-directory! (fn [directory] (swap! trace conj directory) (real-directory! directory))]
+                (let [result (runtime/retry-append! {:schema/directory (str root "/schemas")} recovery)]
+                  (is (= :already-present (:append/result result)))
+                  (is (= (:event recovery) (:event result)))))
+              (is (= [:inode root] @trace))
+              (is (= visible (ledger/read-ledger path)))
+              (is (= :clio.ledger/id-collision
+                     (try (runtime/retry-append! rt (assoc-in recovery [:event :event/data :amount] 8))
+                          nil (catch Exception error (:clio/error (ex-data error))))))
+              (is (= visible (ledger/read-ledger path))))))
+        (finally (fs/remove-tree! root))))))
 
 (deftest retry-forces-existing-ancestry-after-interrupted-directory-creation
   (let [root (str "/tmp/clio-directory-retry-" (host/random-uuid))

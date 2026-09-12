@@ -1,6 +1,12 @@
 (ns clio.extern.js.process
   (:require [promesa.core :as p]
+            ["node:fs" :as node-fs]
             ["node:child_process" :as child-process]))
+
+(defn write-error!
+  "Write complete diagnostics synchronously before the CLI's explicit exit."
+  [text]
+  (.writeFileSync node-fs 2 text))
 
 (defn exit!
   [code]
