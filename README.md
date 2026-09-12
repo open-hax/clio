@@ -215,6 +215,13 @@ Clio has no stale lockfile, lease timeout, PID-reclamation protocol, or
 application-level fencing race. Symlink and hard-link aliases therefore contend
 on the same underlying file identity rather than on path-derived lock names.
 
+`read-ledger` and each partition snapshot in `read-ledgers` use a read-only
+descriptor with a shared lock. On Unix this is a POSIX read lock plus shared
+`flock` in Node, or a shared `FileChannel` lock on the JVM. Read-only replay thus
+needs no write permission and still waits for participating exclusive writers
+to finish. The reader parses through the descriptor that owns its lock, then
+releases it. This is a per-file snapshot, not one transaction across files.
+
 Whether a candidate event may join a partition is a law, not transport.
 `clio.law.ledger/append-admission` classifies it against the events already
 present — `:appendable`, `:already-present`, `:id-collision`, or
@@ -230,10 +237,10 @@ becoming a fresh empty history while the intended ledger stays behind.
 
 A POSIX record lock is released when the process closes *any* descriptor for
 that file, not only the one that took the lock. Path-based `read-text` would
-therefore drop a held lock silently, so `clio.extern.js.fs` tracks the paths
-this process has locked and refuses that read outright; callers inside a
-critical section use `read-locked-text`. The guard keys on the path while the
-lock keys on the inode, so a hard-link alias under another name is not caught.
+therefore drop a held lock silently, so `clio.extern.js.fs` tracks the paths and
+exact device/inode identities this process has locked. It refuses path reads
+and lock reentry through the same path or an alias before opening another
+descriptor; callers inside a critical section use `read-locked-text`.
 
 The JVM adapter uses `FileChannel.lock` on the same existing inode. On Unix
 this participates in the Node adapter's authoritative POSIX record-lock

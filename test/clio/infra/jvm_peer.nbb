@@ -15,11 +15,13 @@
     "read-single"
     (let [read-text fs/read-text
           acquire-lock! fs/acquire-lock!
+          acquire-read-lock! fs/acquire-read-lock!
           signal! (fn [path]
                     (when (= ledger-file path)
                       (fs/write-text! ready-file "reading")))]
       (with-redefs [fs/read-text (fn [path] (signal! path) (read-text path))
-                    fs/acquire-lock! (fn [path] (signal! path) (acquire-lock! path))]
+                    fs/acquire-lock! (fn [path] (signal! path) (acquire-lock! path))
+                    fs/acquire-read-lock! (fn [path] (signal! path) (acquire-read-lock! path))]
         (try
           (println (pr-str {:events (ledger/read-ledger ledger-file)}))
           (catch :default cause

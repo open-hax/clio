@@ -157,7 +157,7 @@
   (contains? #{"ENOSYS" "ENOTSUP" "EOPNOTSUPP"} (.-code cause)))
 
 (defn- acquire-unix-lock!
-  [fd]
+  [fd read-only?]
   ;; flock gives open-file-description exclusion on local filesystems, which
   ;; also protects separate descriptors in one process. Some NFS mounts do not
   ;; implement flock, so unsupported-flock errors deliberately fall through.
@@ -166,20 +166,35 @@
   ;; advisory lock — "mandatory locking" is an unrelated, effectively dead
   ;; POSIX feature, not what F_SETLKW does.
   (try
-    (fs-ext/flockSync fd "ex")
+    (fs-ext/flockSync fd (if read-only? "sh" "ex"))
     (catch :default cause
       (when-not (unsupported-flock? cause)
         (throw cause))))
-  (fs-ext/fcntlSync fd "setlkw" (native-constant "F_WRLCK") 0 0))
+  (fs-ext/fcntlSync fd "setlkw" (native-constant (if read-only? "F_RDLCK" "F_WRLCK")) 0 0))
 
 (defn- acquire-native-lock!
-  [fd]
+  [fd read-only?]
   (if (windows?)
     (fs-ext/lockFileExSync
      fd
-     (native-constant "LOCKFILE_EXCLUSIVE_LOCK")
+     (if read-only? 0 (native-constant "LOCKFILE_EXCLUSIVE_LOCK"))
      0 0 0xffffffff 0xffffffff)
-    (acquire-unix-lock! fd)))
+    (acquire-unix-lock! fd read-only?)))
+
+(defn- acquire-lock-mode!
+  [path read-only?]
+  (refuse-locked-path! path)
+  (let [flags (if read-only?
+                (.-O_RDONLY (.-constants fs))
+                (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs))))
+        fd (.openSync fs path flags)]
+    (try
+      (acquire-native-lock! fd read-only?)
+      (swap! locked-paths assoc path (stat-identity (fs/fstatSync fd #js {:bigint true})))
+      {:lock/path path :lock/fd fd}
+      (catch :default cause
+        (fs/closeSync fd)
+        (throw cause)))))
 
 (defn acquire-lock!
   "Open an existing ledger and hold an OS-backed exclusive lock on its inode.
@@ -204,16 +219,16 @@
    here and appended to as an empty history. create-ledger! is the only
    creation path; an absent ledger fails with ENOENT."
   [path]
-  (refuse-locked-path! path)
-  (let [flags (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs)))
-        fd (.openSync fs path flags)]
-    (try
-      (acquire-native-lock! fd)
-      (swap! locked-paths assoc path (stat-identity (fs/fstatSync fd #js {:bigint true})))
-      {:lock/path path :lock/fd fd}
-      (catch :default cause
-        (fs/closeSync fd)
-        (throw cause)))))
+  (acquire-lock-mode! path false))
+
+(defn acquire-read-lock!
+  "Open an existing ledger read-only and hold a shared lock against exclusive writers.
+
+   Unix uses shared flock plus an authoritative whole-file POSIX read lock;
+   Windows uses shared LockFileEx. The same inode guard, owning-descriptor read
+   and release operation apply. This never creates storage or upgrades access."
+  [path]
+  (acquire-lock-mode! path true))
 
 (defn read-locked-text
   "Read the locked ledger through the same descriptor that owns the lock."

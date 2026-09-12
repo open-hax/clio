@@ -1,6 +1,7 @@
 (ns clio.extern.jvm.test-support
   (:import [java.io File]
            [java.nio.file Files LinkOption Paths]
+           [java.nio.file.attribute PosixFilePermissions]
            [java.util.concurrent TimeUnit]))
 
 (defn start!
@@ -45,3 +46,10 @@
 (defn non-edn-instant [] (java.time.Instant/now))
 (defn arbitrary-object [] (Object.))
 (defn instant-at [millis] (java.util.Date. (long millis)))
+
+(defn permissions!
+  "Set real POSIX fixture permissions; descriptor-mode tests also cover privileged hosts."
+  [path permissions]
+  (Files/setPosixFilePermissions (Paths/get ^String path (make-array String 0))
+                                (PosixFilePermissions/fromString permissions))
+  path)

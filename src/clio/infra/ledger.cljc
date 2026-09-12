@@ -35,7 +35,7 @@
 (defn- read-existing-ledger!
   "Capture and parse one complete immutable snapshot through its owning descriptor."
   [path]
-  (let [lock (fs/acquire-lock! path)]
+  (let [lock (fs/acquire-read-lock! path)]
     (try
       (parse-ledger-text path (fs/read-locked-text lock))
       (finally (fs/release-lock! lock)))))

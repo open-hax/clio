@@ -250,6 +250,7 @@
                                   path partial-ready reader-ready (pr-str fact)] output)
             read-text fs/read-text
             acquire-lock! fs/acquire-lock!
+            acquire-read-lock! fs/acquire-read-lock!
             signal! (fn [candidate]
                       (when (= path candidate)
                         (fs/write-text! reader-ready "reading")))]
@@ -259,7 +260,9 @@
                 result (with-redefs [fs/read-text (fn [candidate]
                                                    (signal! candidate) (read-text candidate))
                                     fs/acquire-lock! (fn [candidate]
-                                                       (signal! candidate) (acquire-lock! candidate))]
+                                                       (signal! candidate) (acquire-lock! candidate))
+                                    fs/acquire-read-lock! (fn [candidate]
+                                                            (signal! candidate) (acquire-read-lock! candidate))]
                          (try {:events (ledger/read-ledger path)}
                               (catch Exception cause {:error (:clio/error (ex-data cause))})))]
             (is (= {:events [fact]} result)
@@ -294,3 +297,46 @@
           (is (= {:events [fact]} (edn/read-one (str/trim (fs/read-text output)))))
           (is (= [fact] (ledger/read-ledger path)))
           (finally (when @peer (support/stop! @peer))))))))
+
+(deftest both-hosts-replay-a-read-only-ledger-without-changing-its-bytes
+  (with-ledger
+    (fn [{:keys [directory path schemas runtime]}]
+      (let [fact (:event (runtime/append! runtime path :record/observed fixture/facts))
+            before (fs/read-text path)
+            output (str directory "/read-only-peer.out")
+            ready (str directory "/read-only-peer-ready")]
+        (support/permissions! path "r--r--r--")
+        (try
+          (is (= {:events [fact]}
+                 (try {:events (ledger/read-ledger path)}
+                      (catch Exception cause {:error (ex-message cause)})))
+              "Inspection needs read permission, including while using an advisory lock")
+          (let [peer (support/start! ["nbb" "-cp" "test" "test/clio/infra/jvm_peer.nbb"
+                                      "read-single" schemas path ready] output)]
+            (try
+              (is (= 0 (support/finish! peer)) (fs/read-text output))
+              (is (= {:events [fact]} (edn/read-one (str/trim (fs/read-text output)))))
+              (finally (support/stop! peer))))
+          (is (= before (fs/read-text path)) "Replay never changes read-only history")
+          (finally (support/permissions! path "rw-r--r--")))))))
+
+(deftest jvm-shared-descriptor-refuses-writes-and-reentry-even-with-write-permission
+  (with-ledger
+    (fn [{:keys [directory path]}]
+      (let [alias (str directory "/read-alias.edn")]
+        (fs/write-text! path "retained")
+        (fs/hard-link! path alias)
+        (let [lock (fs/acquire-read-lock! path)]
+          (try
+            (is (= "retained" (fs/read-locked-text lock)))
+            (is (thrown? java.nio.channels.NonWritableChannelException
+                         (fs/append-locked-text! lock "corruption")))
+            (doseq [candidate [path alias]
+                    acquire! [fs/acquire-read-lock! fs/acquire-lock!]]
+              (is (= :clio.fs/locked-path-read (error-code #(acquire! candidate)))))
+            (finally (fs/release-lock! lock))))
+        (is (= "retained" (fs/read-text path)))
+        (let [writer (fs/acquire-lock! path)]
+          (try (fs/append-locked-text! writer " after release")
+               (finally (fs/release-lock! writer))))
+        (is (= "retained after release" (fs/read-text path)))))))
