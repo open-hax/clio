@@ -169,9 +169,12 @@
   [path read-only?]
   (.lock process-guard)
   (try
-    (refuse-locked-path! path)
-    (let [key (file-key path)
-          channel (FileChannel/open (nio-path path)
+    ;; Resolve before opening so a later symlink retarget cannot redirect the
+    ;; parent fence away from the inode held by this channel.
+    (let [target-path (absolute-path path)
+          _ (refuse-locked-path! target-path)
+          key (file-key target-path)
+          channel (FileChannel/open (nio-path target-path)
                                     (into-array OpenOption
                                                 (if read-only? [StandardOpenOption/READ]
                                                     [StandardOpenOption/READ StandardOpenOption/WRITE])))]
@@ -179,7 +182,8 @@
         (let [lock (.lock channel 0 Long/MAX_VALUE (boolean read-only?))
               token (str (UUID/randomUUID))]
           (swap! active-locks assoc token
-                 {:channel channel :file-lock lock :file/key key :path path})
+                 {:channel channel :file-lock lock :file/key key
+                  :path path :target-path target-path})
           {:lock/id token :lock/path path})
         (catch Throwable cause
           (.close channel)
@@ -232,18 +236,18 @@
 (defn append-locked-text!
   "Append and force the owning inode, then its directory entry, before acknowledgment."
   [token text]
-  (let [{:keys [^FileChannel channel path]} (lock-entry token)]
+  (let [{:keys [^FileChannel channel path target-path]} (lock-entry token)]
     (.position channel (.size channel))
     (write-buffer! channel text)
-    (sync-directory! (parent-path path))
+    (sync-directory! (parent-path target-path))
     path))
 
 (defn sync-locked!
   "Reflush the locked inode and parent, including an uncertain earlier creation."
   [token]
-  (let [{:keys [channel path]} (lock-entry token)]
+  (let [{:keys [channel path target-path]} (lock-entry token)]
     (force-file! channel)
-    (sync-directory! (parent-path path))
+    (sync-directory! (parent-path target-path))
     path))
 
 (defn release-lock!

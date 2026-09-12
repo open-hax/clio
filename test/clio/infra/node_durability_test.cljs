@@ -21,6 +21,95 @@
 (defn- error-code [operation]
   (try (operation) nil (catch :default cause (:clio/error (ex-data cause)))))
 
+(defn- with-ledger-alias [relative? operation]
+  (with-directory
+    (fn [directory]
+      (let [target-parent (str directory "/target")
+            alias-parent (str directory "/aliases")
+            target (str target-parent "/events.edn")
+            alias (str alias-parent "/events.edn")
+            rt (runtime/open (str directory "/schemas") fixture/catalog)]
+        (fs/ensure-dir! target-parent)
+        (fs/ensure-dir! alias-parent)
+        (observer/symbolic-link! target alias)
+        (operation {:target target :target-parent target-parent :runtime rt
+                    :alias (if relative? (observer/relative-to-cwd alias) alias)})))))
+
+(defn- refuse-parent-sync [parent operation]
+  (error-code
+    #(observer/with-observer
+       (fn [event]
+         (when (= parent (:path event))
+           (throw (ex-info "Injected target parent force refusal" {}))))
+       operation)))
+
+(defn- leave-uncertain-creation! [target target-parent]
+  (let [inode-seen? (atom false)]
+    (is (= :clio.fs/directory-sync-unavailable
+           (error-code
+             #(observer/with-observer
+                (fn [operation]
+                  (when (= target (:path operation)) (reset! inode-seen? true))
+                  (when (and @inode-seen? (= target-parent (:path operation)))
+                    (throw (ex-info "Injected post-create parent force refusal" {}))))
+                (fn [] (ledger/create-ledger! target))))))
+    (is (fs/exists? target) "Creation is visible but its directory entry was not acknowledged")))
+
+(deftest symbolic-link-recovery-refuses-an-unsynchronized-target-parent
+  (doseq [relative? [false true]]
+    (with-ledger-alias
+      relative?
+      (fn [{:keys [target target-parent alias runtime]}]
+        (leave-uncertain-creation! target target-parent)
+        (let [revisions (:schema/revisions runtime) trace (atom [])]
+          (is (= :clio.fs/directory-sync-unavailable
+                 (refuse-parent-sync target-parent #(ledger/ensure-durable! revisions alias)))
+              "An alias parent cannot stand in for the target's failed creation fence")
+          (observer/with-observer #(swap! trace conj (:path %))
+            #(is (= alias (ledger/ensure-durable! revisions alias))))
+          (is (= [target target-parent] @trace)
+              "Recovery syncs the owning inode and its actual directory entry")
+          (is (= [] (ledger/read-ledger alias))))))))
+
+(deftest symbolic-link-appends-and-exact-retries-fence-the-target-parent
+  (doseq [relative? [false true]]
+    (with-ledger-alias
+      relative?
+      (fn [{:keys [target target-parent alias runtime]}]
+        (leave-uncertain-creation! target target-parent)
+        (let [revisions (:schema/revisions runtime)
+              fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+              append! #(ledger/append-event! revisions alias fact)
+              trace (atom [])]
+          (is (= :clio.fs/directory-sync-unavailable (refuse-parent-sync target-parent append!))
+              "A new append through an alias must retain the actual parent fence")
+          (is (= [fact] (ledger/read-ledger target)))
+          (is (= :clio.fs/directory-sync-unavailable (refuse-parent-sync target-parent append!))
+              "An exact retry cannot acknowledge a persistently refused target parent")
+          (observer/with-observer #(swap! trace conj (:path %))
+            #(is (= :already-present (append!))))
+          (is (= [target target-parent] @trace))
+          (is (= [fact] (ledger/read-ledger alias))))))))
+
+(deftest locked-symbolic-link-retargeting-cannot-move-the-durability-fence
+  (with-ledger-alias
+    false
+    (fn [{:keys [target target-parent alias]}]
+      (let [replacement (str alias ".replacement") trace (atom [])]
+        (ledger/create-ledger! target)
+        (ledger/create-ledger! replacement)
+        (observer/with-observer #(swap! trace conj (:path %))
+          #(let [lock (fs/acquire-lock! alias)]
+             (try
+               (fs/delete-if-exists! alias)
+               (observer/symbolic-link! replacement alias)
+               (is (= alias (fs/sync-locked! lock)))
+               (is (= alias (fs/append-locked-text! lock "retained")))
+               (finally (fs/release-lock! lock)))))
+        (is (= [target target-parent target target-parent] @trace))
+        (is (= "retained" (fs/read-text target)))
+        (is (= "" (fs/read-text alias)))))))
+
 (deftest public-append-preserves-symbolic-link-parent-path-semantics
   (doseq [relative? [false true]]
     (with-directory

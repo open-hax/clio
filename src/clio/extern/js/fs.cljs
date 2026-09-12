@@ -193,15 +193,18 @@
 
 (defn- acquire-lock-mode!
   [path read-only?]
-  (refuse-locked-path! path)
-  (let [flags (if read-only?
+  ;; Bind the resolved target before opening it: a later symlink retarget must
+  ;; not move the parent fence away from the inode owned by this descriptor.
+  (let [target-path (absolute-path path)
+        _ (refuse-locked-path! target-path)
+        flags (if read-only?
                 (.-O_RDONLY (.-constants fs))
                 (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs))))
-        fd (.openSync fs path flags)]
+        fd (.openSync fs target-path flags)]
     (try
       (acquire-native-lock! fd read-only?)
-      (swap! locked-paths assoc path (stat-identity (fs/fstatSync fd #js {:bigint true})))
-      {:lock/path path :lock/fd fd}
+      (swap! locked-paths assoc target-path (stat-identity (fs/fstatSync fd #js {:bigint true})))
+      {:lock/path path :lock/target-path target-path :lock/fd fd}
       (catch :default cause
         (fs/closeSync fd)
         (throw cause)))))
@@ -247,22 +250,22 @@
 
 (defn append-locked-text!
   "Append and force the owning inode, then its directory entry, before acknowledgment."
-  [{:lock/keys [fd path]} text]
+  [{:lock/keys [fd path target-path]} text]
   (fs/appendFileSync fd text "utf8")
   (.fsyncSync fs fd)
-  (sync-directory! (parent-path path))
+  (sync-directory! (parent-path target-path))
   path)
 
 (defn sync-locked!
   "Reflush the locked inode and parent, including an uncertain earlier creation."
-  [{:lock/keys [fd path]}]
+  [{:lock/keys [fd path target-path]}]
   (.fsyncSync fs fd)
-  (sync-directory! (parent-path path))
+  (sync-directory! (parent-path target-path))
   path)
 
 (defn release-lock!
   "Close the owning descriptor. Kernel file locks are released by close."
-  [{:lock/keys [fd path]}]
-  (swap! locked-paths dissoc path)
+  [{:lock/keys [fd target-path]}]
+  (swap! locked-paths dissoc target-path)
   (fs/closeSync fd)
   nil)
