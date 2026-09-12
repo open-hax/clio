@@ -54,3 +54,31 @@ openers, typed consumers, and the creation/reopen failures. CodeRabbit finding
 3996101377 also led to a failure-first sequence-shape guard for translation
 batches; invalid inputs preserve ledger bytes. Test and library compilation,
 strict TypeScript, and kondo complete with zero warnings.
+
+## Locked projection snapshots
+
+Codex finding 3996163876 exposed a read-side race: canonicalization previously
+read a ledger by pathname while another process could hold its writer lock and
+have written only part of an EDN event. Queries and provider open could therefore
+reject a valid store as malformed. `read-ledgers` now captures each complete
+snapshot through the descriptor protected by the same native inode lock used
+by appenders, releases the lock in `finally`, and passes immutable snapshots to
+pure validation and union. Independent partition files remain independent; this
+change does not claim a single atomic snapshot across several files.
+
+A real two-process public JavaScript regression pauses a writer halfway through
+its actual append while retaining the native Clio lock. Both query and open
+failed on the old source with partial-EDN parse errors. With locked snapshots,
+both wait and observe the complete event. Separate Node and JVM fault tests
+prove pathname reads are not used and a failed descriptor read releases its lock.
+Those host regressions each failed three assertions before correction.
+
+Fresh final verification for this successor: Babashka 25 tests / 75 assertions,
+JVM 67 / 202, NBB and compiled Shadow 65 / 178; Shadow 115 files, zero compiler
+warnings. Protocols pass 71 / 217 plus 15 native Node tests without skips, strict
+TypeScript, kondo, and test/library compilation (136 / 111 files, zero warnings).
+Sol passes 142 / 607 plus its native worker cleanup test, test/server compilation
+(215 / 201 files, zero warnings), and its configured lint/contract guard. Existing
+informational excluded-var and Sol layer diagnostics remain informational; no
+warning enforcement was relaxed. These totals describe the new isolated snapshot
+worktree, not previously frozen browser or consumer checkouts.

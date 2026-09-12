@@ -48,6 +48,31 @@
     (catch :default cause
       (ex-message cause))))
 
+(deftest canonical-snapshots-read-through-the-lock-and-release-on-read-failure
+  (let [directory (str "/tmp/clio-snapshot-" (host/random-uuid))
+        file (str directory "/events.edn")
+        releases (atom 0)
+        release! fs/release-lock!]
+    (try
+      (fs/ensure-dir! directory)
+      (ledger/create-ledger! file)
+      (let [rt (runtime/open (str directory "/schemas") catalog)
+            fact (:event (runtime/append! rt file :counter/opened
+                                          {:event/stream "counter:snapshot" :event/seq 1
+                                           :event/actor "reader-test" :event/subject "counter:snapshot"
+                                           :event/data {:amount 10}}))
+            revisions (:schema/revisions rt)]
+        (with-redefs [fs/read-text (fn [_] (throw (ex-info "Unlocked path read" {:clio/error :unlocked-read})))]
+          (is (= {:events [fact]}
+                 (try {:events (:canonical/events (ledger/canonicalize-files revisions [file]))}
+                      (catch :default cause {:error (:clio/error (ex-data cause))})))))
+        (with-redefs [fs/read-locked-text (fn [_] (throw (ex-info "Injected snapshot read failure" {:clio/error :injected-read})))
+                      fs/release-lock! (fn [lock] (swap! releases inc) (release! lock))]
+          (is (= :injected-read (error-code #(ledger/canonicalize-files revisions [file]))))
+          (is (= 1 @releases) "Failed reading releases the owning descriptor"))
+        (is (= [fact] (:canonical/events (ledger/canonicalize-files revisions [file])))))
+      (finally (fs/remove-tree! directory)))))
+
 (deftest append-and-projection-are-idempotent
   (let [directory (str "/tmp/clio-" (host/random-uuid))
         schema-directory (str directory "/schemas")

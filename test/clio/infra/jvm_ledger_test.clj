@@ -30,6 +30,23 @@
 (defn reduce-amount [state evt]
   (+ state (get-in evt [:event/data :amount])))
 
+(deftest jvm-canonical-snapshots-release-the-owning-channel-on-read-failure
+  (with-ledger
+    (fn [{:keys [path runtime]}]
+      (let [fact (:event (runtime/append! runtime path :record/observed fixture/facts))
+            revisions (:schema/revisions runtime)
+            releases (atom 0)
+            release! fs/release-lock!]
+        (with-redefs [fs/read-text (fn [_] (throw (ex-info "Unlocked path read" {:clio/error :unlocked-read})))]
+          (is (= {:events [fact]}
+                 (try {:events (:canonical/events (ledger/canonicalize-files revisions [path]))}
+                      (catch Exception cause {:error (:clio/error (ex-data cause))})))))
+        (with-redefs [fs/read-locked-text (fn [_] (throw (ex-info "Injected snapshot read failure" {:clio/error :injected-read})))
+                      fs/release-lock! (fn [lock] (swap! releases inc) (release! lock))]
+          (is (= :injected-read (error-code #(ledger/canonicalize-files revisions [path]))))
+          (is (= 1 @releases)))
+        (is (= [fact] (:canonical/events (ledger/canonicalize-files revisions [path]))))))))
+
 (deftest jvm-restart-rebuilds-typed-events-and-projections
   (with-ledger
     (fn [{:keys [directory path schemas runtime]}]

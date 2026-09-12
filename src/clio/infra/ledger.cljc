@@ -111,9 +111,17 @@
       (finally (fs/release-lock! lock)))))
 
 (defn read-ledgers
+  "Capture complete per-file snapshots under the same inode locks used by writers.
+   Pure validation/union consumes these immutable values after releasing each lock;
+   this does not imply one atomic transaction across separate partition files."
   [paths]
   (doseq [path paths] (require-ledger-path! path))
-  (mapv read-ledger paths))
+  (mapv (fn [path]
+          (let [lock (fs/acquire-lock! path)]
+            (try
+              (parse-ledger-text path (fs/read-locked-text lock))
+              (finally (fs/release-lock! lock)))))
+        paths))
 
 (defn canonicalize-files
   [revisions paths]
