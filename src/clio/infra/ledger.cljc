@@ -106,18 +106,27 @@
       (finally
         (fs/release-lock! lock)))))
 
-(defn ensure-durable!
-  "Validate and reflush an existing ledger before acknowledging reopen or a no-change retry.
-   Visible history can contain a creation or append whose synchronization failed. The
-   owning lock must remain held through validation and the new durability fence."
-  [revisions path]
+(defn ensure-durable-with!
+  "Read under the owning lock, then load revisions, validate and reflush before release.
+   Loading after capture admits concurrently published schemas without weakening
+   validation. The loader must be synchronous and must not acquire this ledger lock."
+  [load-revisions path]
   (require-ledger-path! path)
   (let [lock (fs/acquire-lock! path)]
     (try
-      (doseq [existing (parse-ledger-text path (fs/read-locked-text lock))]
-        (schema/validate-event! revisions existing))
+      (let [events (parse-ledger-text path (fs/read-locked-text lock))
+            revisions (load-revisions)]
+        (doseq [existing events]
+          (schema/validate-event! revisions existing)))
       (fs/sync-locked! lock)
       (finally (fs/release-lock! lock)))))
+
+(defn ensure-durable!
+  "Validate and reflush an existing ledger against explicitly supplied revisions.
+   Visible history can contain a creation or append whose synchronization failed. The
+   owning lock remains held through validation and the new durability fence."
+  [revisions path]
+  (ensure-durable-with! (fn [] revisions) path))
 
 (defn read-ledgers
   "Capture complete per-file snapshots under the same inode locks used by writers.

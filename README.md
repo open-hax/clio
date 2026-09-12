@@ -401,6 +401,14 @@ exactly one value of the same kind, namespace and name. Whitespace, delimiters,
 reserved symbol literals and ambiguous constructor namespaces are refused
 before append; valid identifiers retain their existing canonical bytes. This
 also protects generic JavaScript records whose property names become keywords.
+Strings and both identifier components must contain Unicode scalar values:
+UTF-16 high surrogates require an immediately following low surrogate, and a
+low surrogate cannot stand alone. Malformed strings are refused with
+`:clio.canonical/invalid-unicode` before hashing or persistence; the error's
+`:offset` identifies the malformed code unit. Node and JVM UTF-8 encoders
+otherwise replace those units differently. Valid BMP characters, supplementary
+pairs and literal replacement characters retain their exact preimages. No
+Unicode normalization or lossy replacement is performed.
 Malli's data-only predicate symbol `inst?` expresses the instant contract;
 `:inst` is not in its default registry. Use quoted symbols in authored schema
 code so persisted catalogs contain data rather than runtime function objects.

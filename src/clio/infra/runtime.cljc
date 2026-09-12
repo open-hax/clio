@@ -1,5 +1,6 @@
 (ns clio.infra.runtime
-  (:require [clio.domain.schema :as schema]
+  (:require [clio.domain.canonicalize :as canonicalize]
+            [clio.domain.schema :as schema]
             #?(:clj [clio.extern.jvm.crypto :as crypto]
                :cljs [clio.extern.js.crypto :as crypto])
             [clio.infra.event :as event]
@@ -22,6 +23,20 @@
   (assoc runtime
          :schema/revisions
          (schema-store/load-revisions (:schema/directory runtime))))
+
+(defn canonicalize-files
+  "Capture complete locked snapshots before loading their published schema revisions.
+   Schema files are immutable and precede the events that reference them; refreshing
+   after capture avoids mixing newer events with an earlier revision inventory."
+  [runtime paths]
+  (let [snapshots (ledger/read-ledgers paths)
+        revisions (:schema/revisions (refresh runtime))]
+    (canonicalize/canonicalize revisions snapshots)))
+
+(defn ensure-durable!
+  "Refresh schema revisions under the existing ledger's durability lock."
+  [runtime path]
+  (ledger/ensure-durable-with! #(:schema/revisions (refresh runtime)) path))
 
 (defn append!
   [runtime ledger-file schema-id event-data]

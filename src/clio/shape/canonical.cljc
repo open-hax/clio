@@ -180,8 +180,43 @@
                       {:clio/error :clio.canonical/invalid-instant})))
     [:inst (canonical-number millis)]))
 
+(defn- code-unit-between?
+  "Compare one UTF-16 code unit without a host-specific character representation."
+  [lower value upper]
+  (and (not (pos? (compare lower value)))
+       (not (pos? (compare value upper)))))
+
+(defn- invalid-unicode!
+  [offset]
+  (throw (ex-info "Canonical strings and identifiers must contain only Unicode scalars; unpaired UTF-16 surrogates are not portable"
+                  {:clio/error :clio.canonical/invalid-unicode :offset offset})))
+
+(defn- scalar-string!
+  "Retain valid UTF-16 exactly and reject unpaired surrogates before UTF-8 hashing.
+   Node replaces malformed units with U+FFFD while JVM encoders use '?'. Comparing
+   one-unit substrings keeps this linear scan identical on every supported host."
+  [value]
+  (let [length (count value)]
+    (loop [offset 0]
+      (when (< offset length)
+        (let [unit (subs value offset (inc offset))]
+          (cond
+            (code-unit-between? "\uD800" unit "\uDBFF")
+            (if (and (< (inc offset) length)
+                     (code-unit-between? "\uDC00" (subs value (inc offset) (+ offset 2)) "\uDFFF"))
+              (recur (+ offset 2))
+              (invalid-unicode! offset))
+
+            (code-unit-between? "\uDC00" unit "\uDFFF")
+            (invalid-unicode! offset)
+
+            :else (recur (inc offset)))))))
+  value)
+
 (defn- canonical-identifier
   [tag value]
+  (when-let [identifier-namespace (namespace value)] (scalar-string! identifier-namespace))
+  (scalar-string! (name value))
   (when-not
    (try
      (let [reread (edn/read-one (pr-str value))]
@@ -200,12 +235,14 @@
    identically on both runtimes: safe integers by their digits, finite shared
    reals by exact IEEE-754 decomposition; unsafe integers, JVM-only exact-real
    types, and NaN/Infinity are rejected rather than assigned ambiguous
-   cross-runtime identities."
+   cross-runtime identities. Strings and identifier components preserve Unicode
+   scalar sequences exactly; unpaired UTF-16 surrogates are rejected before a
+   host UTF-8 encoder can substitute a different value."
   [value]
   (cond
     (nil? value) [:nil]
     (boolean? value) [:boolean value]
-    (string? value) [:string value]
+    (string? value) [:string (scalar-string! value)]
     (keyword? value) (canonical-identifier :keyword value)
     (symbol? value) (canonical-identifier :symbol value)
     (uuid? value) (canonical-uuid value)
