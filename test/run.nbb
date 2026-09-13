@@ -1,0 +1,28 @@
+#!/usr/bin/env nbb
+
+(ns clio.test-runner
+  (:require [cljs.test :as test]
+            [clio.domain.canonicalize-test]
+            [clio.domain.schema-test]
+            [clio.extern.js.process :as process]
+            [clio.infra.kernel-lock-test]
+            [clio.infra.ledger-test]
+            [clio.law.ledger-test]
+            [clio.lint-extern-boundary-test]
+            [clio.shape.canonical-test]
+            [clio.shape.edn-test]))
+
+(defmethod test/report [:cljs.test/default :end-run-tests]
+  [summary]
+  (when-not (test/successful? summary)
+    (process/exit! 1)))
+
+(test/run-tests
+ 'clio.domain.schema-test
+ 'clio.domain.canonicalize-test
+ 'clio.law.ledger-test
+ 'clio.lint-extern-boundary-test
+ 'clio.infra.kernel-lock-test
+ 'clio.infra.ledger-test
+ 'clio.shape.canonical-test
+ 'clio.shape.edn-test)

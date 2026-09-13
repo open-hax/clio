@@ -1,0 +1,14 @@
+#!/usr/bin/env nbb
+
+(ns clio.bin
+  (:require [clio.extern.js.process :as process]
+            [clio.infra.cli :as cli]))
+
+(try
+  (apply cli/-main *command-line-args*)
+  (catch :default cause
+    (binding [*out* *err*]
+      (println (ex-message cause))
+      (when-let [data (ex-data cause)]
+        (prn data)))
+    (process/exit! 1)))

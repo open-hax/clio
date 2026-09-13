@@ -1,0 +1,4 @@
+;; `test` is not part of the published package, so the suite adds it with
+;; `nbb -cp test`. NBB bundles edamame and promesa; only Malli is resolved.
+{:paths ["src"]
+ :deps {metosin/malli {:mvn/version "0.16.4"}}}

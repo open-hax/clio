@@ -1,0 +1,83 @@
+{:lint-as {shadow.cljs.modern/js-await clojure.core/let
+            js-await* clojure.core/let
+            helix.core/defnc cljs.core/defn
+            eta-mu.platform.dsl/defschema clojure.core/def
+            eta-mu.platform.dsl/defcapability clojure.core/defn
+            eta-mu.platform.dsl/defhook clojure.core/defn
+            eta-mu.platform.dsl/deftool clojure.core/def
+            eta-mu.platform.dsl/defplugin clojure.core/def}
+:config-in-ns {eta-mu.platform.boundary.js     {:linters {:discouraged-var {cljs.core/js->clj {:level :off}
+                                                               cljs.core/clj->js {:level :off}
+                                                               cljs.core/js-obj  {:level :off}
+                                                               cljs.core/aget    {:level :off}
+                                                               cljs.core/aset    {:level :off}
+                                                               cljs.core/alength {:level :off}}}}
+               eta-mu.platform.target.opencode {:linters {:discouraged-var {cljs.core/clj->js {:level :off}}}}}
+ :linters {:unresolved-symbol {:exclude [js/console
+                                        js/Promise
+                                        js/Error
+                                        js/JSON
+                                        js/Object
+                                        js/Array
+                                        js/fetch
+                                        js/parseInt
+                                        js/parseFloat
+                                        js/Boolean
+                                        js/clearTimeout
+                                        js/setTimeout
+                                        js/setInterval
+                                        js/clearInterval
+                                        js/process
+                                        js/Buffer
+                                        js/Symbol
+                                        js/Date
+                                        js/Math
+                                        js/Number
+                                        js/String
+                                        js/Uint8Array
+                                        js/ArrayBuffer
+                                        js/TextDecoder
+                                        js/TextEncoder
+                                        js/structuredClone
+                                        js/URL
+                                        js/URLSearchParams
+                                        js/require
+                                        js/module
+                                        js/exports
+                                        js/__dirname
+                                        js/__filename
+                                        js->clj
+                                        clj->js
+                                        number
+                                        js
+                                        await]}
+           :promise-chain/prefer-async-workflow {:level :warning}
+           ;; Construction order (law → shape → extern → domain → infra). Shipped
+           ;; at :info so a package adopting this config does not fail on debt it
+           ;; has not paid yet; a package that has paid raises them to :error in
+           ;; its own .clj-kondo/config.edn and keeps them there.
+           :layer-boundary/upward-require {:level :info}
+           :layer-boundary/host-require {:level :info}
+           :layer-boundary/js-star-interop {:level :info}
+           :fn-length/long {:level :warning}
+           :fn-length/too-long {:level :error}
+           :file-length/long {:level :warning}
+           :file-length/too-long {:level :error}
+           :complexity/high {:level :warning}
+           :complexity/too-complex {:level :error}
+           :discouraged-var {shadow.cljs.modern/js-await {:message "js-await is deprecated; use bare (await ...) inside ^:async fn."}
+                             js-await* {:message "js-await* is deprecated; use bare (await ...) inside ^:async fn."}}}
+ :unresolved-namespace {:exclude [js]}
+ ;; cljs.core/ns takes one hook: hooks.layer-boundaries/check-ns runs the layer
+ ;; gate and then delegates to hooks.promise-chain/check-ns.
+ :hooks {:analyze-call {cljs.core/ns hooks.layer-boundaries/check-ns
+                        cljs.core/js* hooks.layer-boundaries/check-js-star
+                        cljs.core/-> hooks.promise-chain/check
+                        cljs.core/->> hooks.promise-chain/check
+                        cljs.core/do hooks.promise-chain/check
+                        cljs.core/let hooks.promise-chain/check
+                        cljs.core/when hooks.promise-chain/check
+                        cljs.core/when-let hooks.promise-chain/check
+                        cljs.core/if hooks.promise-chain/check
+                        cljs.core/defn hooks.promise-chain/check-defn
+                        cljs.core/defn- hooks.promise-chain/check-defn}}}
