@@ -384,7 +384,7 @@ promesa are bundled with nbb, so only Malli needs declaring, as `nbb.edn` shows.
 Use the same package as a local dependency; there is no second ledger package:
 
 ```clojure
-{:deps {open-hax/clio {:local/root "../eta-mu/packages/clio"}}}
+{:deps {open-hax/clio {:local/root "../clio"}}}
 ```
 
 The event, schema-store, ledger, runtime and projection APIs are identical
@@ -444,8 +444,8 @@ code so persisted catalogs contain data rather than runtime function objects.
 ## Verification
 
 ```bash
-pnpm --dir packages/clio lint
-pnpm --dir packages/clio test
+pnpm lint
+pnpm test
 ```
 
 The kernel suite runs under NBB, Shadow CLJS and JVM Clojure. The lightweight
