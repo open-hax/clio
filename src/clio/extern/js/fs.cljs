@@ -18,12 +18,18 @@
 (defn missing-path-error? [cause]
   (= "ENOENT" (.-code cause)))
 
-(defn sync-directory!
-  "Force directory entries on the supported Linux filesystem; never acknowledge a weaker write."
+(defn require-directory-sync-support!
+  "Refuse a host without Linux directory durability before any write becomes visible."
   [path]
   (when-not (= "linux" (.-platform js/process))
     (throw (ex-info "Node directory durability is unsupported on this platform"
                     {:path path :clio/error :clio.fs/directory-sync-unavailable})))
+  path)
+
+(defn sync-directory!
+  "Force directory entries on the supported Linux filesystem; never acknowledge a weaker write."
+  [path]
+  (require-directory-sync-support! path)
   (try
     (let [flags (bit-or (.-O_RDONLY (.-constants fs)) (.-O_DIRECTORY (.-constants fs)))
           fd (.openSync fs path flags)]
@@ -251,6 +257,7 @@
 (defn append-locked-text!
   "Append and force the owning inode, then its directory entry, before acknowledgment."
   [{:lock/keys [fd path target-path]} text]
+  (require-directory-sync-support! (parent-path target-path))
   (fs/appendFileSync fd text "utf8")
   (.fsyncSync fs fd)
   (sync-directory! (parent-path target-path))
