@@ -4,7 +4,6 @@
             [clio.extern.js.fs :as fs]
             [clio.infra.ledger :as ledger]
             [clio.infra.runtime :as runtime]
-            [clio.infra.schema-store :as schema-store]
             [clio.law.cli :as cli-law]
             [clio.shape.edn :as edn]))
 
@@ -12,6 +11,7 @@
   (println "clio new <ledger.edn>")
   (println "clio schema-root <catalog.edn>")
   (println "clio append <schema-dir> <catalog.edn> <ledger.edn> <:schema/id> '<event-edn>'")
+  (println "clio retry-append <schema-dir> '<append-recovery-edn>'")
   (println "clio canonicalize <schema-dir> <ledger.edn> [ledger.edn ...]"))
 
 (defn- read-edn-file [path]
@@ -40,9 +40,12 @@
     (prn (select-keys result [:append/result :event]))))
 
 (defn- command-canonicalize [[schema-dir & ledger-files]]
-  (let [revisions (schema-store/load-revisions schema-dir)
-        canonical (ledger/canonicalize-files revisions ledger-files)]
+  (let [canonical (runtime/canonicalize-files {:schema/directory schema-dir} ledger-files)]
     (prn (select-keys canonical [:canonical/event-ids :canonical/events]))))
+
+(defn- command-retry-append [[schema-dir recovery-edn]]
+  (let [result (runtime/retry-append! {:schema/directory schema-dir} (edn/read-one recovery-edn))]
+    (prn (select-keys result [:append/result :event]))))
 
 (defn -main [& args]
   (let [[command-name & command-args] args
@@ -57,4 +60,5 @@
       :new (command-new command-args)
       :schema-root (command-schema-root command-args)
       :append (command-append command-args)
+      :retry-append (command-retry-append command-args)
       :canonicalize (command-canonicalize command-args))))

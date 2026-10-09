@@ -7,8 +7,7 @@
 (try
   (apply cli/-main *command-line-args*)
   (catch :default cause
-    (binding [*out* *err*]
-      (println (ex-message cause))
-      (when-let [data (ex-data cause)]
-        (prn data)))
+    (process/write-error!
+      (str (ex-message cause) "\n"
+           (when-let [data (ex-data cause)] (str (pr-str data) "\n"))))
     (process/exit! 1)))
