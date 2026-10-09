@@ -54,11 +54,10 @@
 (defn exists? [path]
   (Files/exists (nio-path path) no-links))
 
-(defn sync-directory!
-  "Force directory entries on the supported Linux default POSIX filesystem.
-
-   Directory FileChannels are not portable Java. Refuse other implementations
-   and surface open/force failures instead of acknowledging weaker durability."
+(defn require-directory-sync-support!
+  "Refuse, without forcing anything, when `path` is not on the supported Linux
+   default POSIX filesystem. Directory FileChannels are not portable Java.
+   Returns the absolute directory path."
   [path]
   (let [directory (.toAbsolutePath (nio-path path))
         filesystem (.getFileSystem directory)]
@@ -67,6 +66,15 @@
                    (.contains (.supportedFileAttributeViews filesystem) "posix"))
       (throw (ex-info "JVM directory durability is unsupported on this filesystem"
                       {:path path :clio/error :clio.fs/directory-sync-unavailable})))
+    directory))
+
+(defn sync-directory!
+  "Force directory entries on the supported Linux default POSIX filesystem.
+
+   Directory FileChannels are not portable Java. Refuse other implementations
+   and surface open/force failures instead of acknowledging weaker durability."
+  [path]
+  (let [directory (require-directory-sync-support! path)]
     (try
       (with-open [channel (FileChannel/open directory
                                             (into-array OpenOption [StandardOpenOption/READ]))]
@@ -237,6 +245,11 @@
   "Append and force the owning inode, then its directory entry, before acknowledgment."
   [token text]
   (let [{:keys [^FileChannel channel path target-path]} (lock-entry token)]
+    ;; Refuse an unsupported host before the event becomes visible, as rename!
+    ;; checks before moving, so the append fails without writing an event that
+    ;; every retry would then report as failed. Transient force failures after
+    ;; the write keep the uncertain-write retry semantics.
+    (require-directory-sync-support! (parent-path target-path))
     (.position channel (.size channel))
     (write-buffer! channel text)
     (sync-directory! (parent-path target-path))
