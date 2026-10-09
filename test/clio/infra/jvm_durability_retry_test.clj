@@ -1,0 +1,280 @@
+(ns clio.infra.jvm-durability-retry-test
+  (:require [clio.extern.jvm.fs :as fs]
+            [clio.extern.jvm.runtime :as host]
+            [clio.extern.jvm.test-support :as support]
+            [clio.infra.event :as event]
+            [clio.infra.host-fixture :as fixture]
+            [clio.infra.ledger :as ledger]
+            [clio.infra.runtime :as runtime]
+            [clojure.test :refer [deftest is]]))
+
+(defn- with-ledger-alias [relative? operation]
+  (let [root (str "/tmp/clio-alias-durability-" (host/random-uuid))
+        target-parent (str root "/target") alias-parent (str root "/aliases")
+        target (str target-parent "/events.edn") alias (str alias-parent "/events.edn")]
+    (try
+      (fs/ensure-dir! target-parent)
+      (fs/ensure-dir! alias-parent)
+      (support/symbolic-link! target alias)
+      (operation {:target target :target-parent target-parent
+                  :runtime (runtime/open (str root "/schemas") fixture/catalog)
+                  :alias (if relative? (support/relative-to-cwd alias) alias)})
+      (finally (fs/remove-tree! root)))))
+
+(defn- observe-forces [observe! operation]
+  (let [real-file! fs/force-file! real-directory! fs/sync-directory!]
+    (with-redefs [fs/force-file! (fn [channel] (observe! :inode) (real-file! channel))
+                  fs/sync-directory! (fn [path] (observe! path) (real-directory! path))]
+      (operation))))
+
+(defn- refuse-parent-sync [parent operation]
+  (try
+    (observe-forces
+      (fn [path]
+        (when (= parent path)
+          (throw (ex-info "Injected target parent force refusal"
+                          {:clio/error :clio.fs/directory-sync-unavailable}))))
+      operation)
+    nil
+    (catch Exception cause (:clio/error (ex-data cause)))))
+
+(defn- leave-uncertain-creation! [target target-parent]
+  (is (= :clio.fs/directory-sync-unavailable
+         (refuse-parent-sync target-parent #(ledger/create-ledger! target))))
+  (is (fs/exists? target) "Creation is visible but its directory entry was not acknowledged"))
+
+(deftest symbolic-link-recovery-refuses-an-unsynchronized-target-parent
+  (doseq [relative? [false true]]
+    (with-ledger-alias
+      relative?
+      (fn [{:keys [target target-parent alias runtime]}]
+        (leave-uncertain-creation! target target-parent)
+        (let [revisions (:schema/revisions runtime) trace (atom [])]
+          (is (= :clio.fs/directory-sync-unavailable
+                 (refuse-parent-sync target-parent #(ledger/ensure-durable! revisions alias)))
+              "An alias parent cannot stand in for the target's failed creation fence")
+          (observe-forces #(swap! trace conj %)
+            #(is (= alias (ledger/ensure-durable! revisions alias))))
+          (is (= [:inode target-parent] @trace)
+              "Recovery forces the owning inode and its actual directory entry")
+          (is (= [] (ledger/read-ledger alias))))))))
+
+(deftest symbolic-link-appends-and-exact-retries-fence-the-target-parent
+  (doseq [relative? [false true]]
+    (with-ledger-alias
+      relative?
+      (fn [{:keys [target target-parent alias runtime]}]
+        (leave-uncertain-creation! target target-parent)
+        (let [revisions (:schema/revisions runtime)
+              fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+              append! #(ledger/append-event! revisions alias fact)
+              trace (atom [])]
+          (is (= :clio.fs/directory-sync-unavailable (refuse-parent-sync target-parent append!))
+              "A new append through an alias must retain the actual parent fence")
+          (is (= [fact] (ledger/read-ledger target)))
+          (is (= :clio.fs/directory-sync-unavailable (refuse-parent-sync target-parent append!))
+              "An exact retry cannot acknowledge a persistently refused target parent")
+          (observe-forces #(swap! trace conj %) #(is (= :already-present (append!))))
+          (is (= [:inode target-parent] @trace))
+          (is (= [fact] (ledger/read-ledger alias))))))))
+
+(deftest locked-symbolic-link-retargeting-cannot-move-the-durability-fence
+  (with-ledger-alias
+    false
+    (fn [{:keys [target target-parent alias]}]
+      (let [replacement (str alias ".replacement") trace (atom [])]
+        (ledger/create-ledger! target)
+        (ledger/create-ledger! replacement)
+        (observe-forces #(swap! trace conj %)
+          #(let [lock (fs/acquire-lock! alias)]
+             (try
+               (fs/delete-if-exists! alias)
+               (support/symbolic-link! replacement alias)
+               (is (= alias (fs/sync-locked! lock)))
+               (is (= alias (fs/append-locked-text! lock "retained")))
+               (finally (fs/release-lock! lock)))))
+        (is (= [:inode target-parent :inode target-parent] @trace))
+        (is (= "retained" (fs/read-text target)))
+        (is (= "" (fs/read-text alias)))))))
+
+(deftest public-append-preserves-symbolic-link-parent-path-semantics
+  (doseq [relative? [false true]]
+    (let [root (str "/tmp/clio-link-parent-" (host/random-uuid))]
+      (try
+        (fs/ensure-dir! (str root "/a"))
+        (fs/ensure-dir! (str root "/b/deep"))
+        (support/symbolic-link! (str root "/b/deep") (str root "/a/link"))
+        (let [intended (str root "/b/events.edn") lexical (str root "/a/events.edn")
+              rt (runtime/open (str root "/schemas") fixture/catalog)
+              supplied (str (if relative? (support/relative-to-cwd root) root) "/a/link/../events.edn")]
+          (ledger/create-ledger! intended)
+          (ledger/create-ledger! lexical)
+          (let [result (runtime/append! rt supplied :record/observed fixture/facts)]
+            (is (= [(:event result)] (ledger/read-ledger intended)))
+            (is (= [] (ledger/read-ledger lexical)) "Lexical '..' normalization must not redirect an append")))
+        (finally (fs/remove-tree! root))))))
+
+(deftest public-append-exposes-the-exact-event-after-uncertain-durability
+  (doseq [phase [:inode :parent]]
+    (let [root (str "/tmp/clio-public-recovery-" (host/random-uuid))
+          path (str root "/events.edn")
+          real-force! fs/force-file!]
+      (try
+        (fs/ensure-dir! root)
+        (ledger/create-ledger! path)
+        (let [rt (runtime/open (str root "/schemas") fixture/catalog)
+              cause (try
+                      (with-redefs [fs/force-file! (fn [channel]
+                                                   (if (= phase :inode)
+                                                     (throw (ex-info "Injected public append force failure" {:injected true}))
+                                                     (real-force! channel)))
+                                    fs/sync-directory! (fn [_] (throw (ex-info "Injected public append force failure" {:injected true})))]
+                        (runtime/append! rt path :record/observed fixture/facts))
+                      nil (catch Exception error error))
+              visible (ledger/read-ledger path)
+              recovery (:clio/append-recovery (ex-data cause))]
+          (is (some? cause) "Uncertain durability remains a failure")
+          (is (= 1 (count visible)) "The actual write is already visible")
+          (is (= {:ledger/path path :event (first visible)}
+                 recovery)
+              "The public error must preserve generated UUID, timestamp and exact event")
+          (when recovery
+            (let [retry-cause (try
+                                (with-redefs [fs/force-file! (fn [channel]
+                                                             (if (= phase :inode)
+                                                               (throw (ex-info "Still refusing public retry force" {}))
+                                                               (real-force! channel)))
+                                              fs/sync-directory! (fn [_] (throw (ex-info "Still refusing public retry force" {})))]
+                                  (runtime/retry-append! rt recovery))
+                                nil (catch Exception error error))
+                  trace (atom []) real-directory! fs/sync-directory!]
+              (is (some? retry-cause))
+              (is (= recovery (:clio/append-recovery (ex-data retry-cause))))
+              (with-redefs [fs/force-file! (fn [channel] (swap! trace conj :inode) (real-force! channel))
+                            fs/sync-directory! (fn [directory] (swap! trace conj directory) (real-directory! directory))]
+                (let [result (runtime/retry-append! {:schema/directory (str root "/schemas")} recovery)]
+                  (is (= :already-present (:append/result result)))
+                  (is (= (:event recovery) (:event result)))))
+              (is (= [:inode root] @trace))
+              (is (= visible (ledger/read-ledger path)))
+              (is (= :clio.ledger/id-collision
+                     (try (runtime/retry-append! rt (assoc-in recovery [:event :event/data :amount] 8))
+                          nil (catch Exception error (:clio/error (ex-data error))))))
+              (is (= visible (ledger/read-ledger path))))))
+        (finally (fs/remove-tree! root))))))
+
+(deftest retry-forces-existing-ancestry-after-interrupted-directory-creation
+  (let [root (str "/tmp/clio-directory-retry-" (host/random-uuid))
+        parent (str root "/nested")
+        leaf (str parent "/schemas")
+        real-sync! fs/sync-directory!
+        refused* (atom false)
+        observed* (atom [])]
+    (try
+      (with-redefs [fs/sync-directory!
+                    (fn [directory]
+                      (if (and (= parent directory) (compare-and-set! refused* false true))
+                        (throw (ex-info "Injected parent force failure"
+                                        {:clio/error :clio.fs/directory-sync-unavailable}))
+                        (real-sync! directory)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected parent force failure"
+                             (fs/ensure-dir! leaf))))
+      (is (fs/exists? leaf) "mkdir succeeded even though durability was not acknowledged")
+      (with-redefs [fs/sync-directory!
+                    (fn [directory]
+                      (swap! observed* conj directory)
+                      (real-sync! directory))]
+        (is (= leaf (fs/ensure-dir! leaf))))
+      (is (every? (set @observed*) [leaf parent root "/tmp" "/"])
+          "A retry must force already-created directories and their parent entries")
+      (finally (fs/remove-tree! root)))))
+
+(deftest visible-event-retries-must-force-the-owning-channel-again
+  (let [root (str "/tmp/clio-event-retry-" (host/random-uuid))
+        path (str root "/events.edn")
+        forced (atom 0)]
+    (try
+      (fs/ensure-dir! root)
+      (ledger/create-ledger! path)
+      (let [runtime (runtime/open (str root "/schemas") fixture/catalog)
+            revisions (:schema/revisions runtime)
+            fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)
+            original-force! fs/force-file!]
+        (with-redefs [fs/force-file! (fn [_] (swap! forced inc)
+                                      (throw (ex-info "Injected event force failure" {})))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/append-event! revisions path fact)))
+          (is (= [fact] (ledger/read-ledger path)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/append-event! revisions path fact)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected event force failure"
+                               (ledger/ensure-durable! revisions path)))
+          (is (= 3 @forced)))
+        (with-redefs [fs/force-file! (fn [channel] (swap! forced inc) (original-force! channel))]
+          (is (= :already-present (ledger/append-event! revisions path fact)))
+          (is (= path (ledger/ensure-durable! revisions path))))
+        (is (= 5 @forced))
+        (is (= [fact] (ledger/read-ledger path))))
+      (finally (fs/remove-tree! root)))))
+
+(deftest empty-ledger-forces-the-created-inode-before-the-parent
+  (let [root (str "/tmp/clio-empty-force-" (host/random-uuid))
+        file (str root "/events.edn")
+        observed (atom [])
+        real-file! fs/force-file!
+        real-directory! fs/sync-directory!]
+    (try
+      (fs/ensure-dir! root)
+      (with-redefs [fs/force-file! (fn [channel] (swap! observed conj :inode) (real-file! channel))
+                    fs/sync-directory! (fn [path] (swap! observed conj :parent) (real-directory! path))]
+        (is (= file (fs/create-exclusive! file))))
+      (is (= [:inode :parent] @observed))
+      (is (= "" (fs/read-text file)))
+      (finally (fs/remove-tree! root)))))
+
+(deftest failed-empty-inode-force-is-never-acknowledged
+  (let [root (str "/tmp/clio-empty-force-failure-" (host/random-uuid))
+        file (str root "/events.edn")
+        parent-forced? (atom false)]
+    (try
+      (fs/ensure-dir! root)
+      (with-redefs [fs/force-file! (fn [_] (throw (ex-info "Injected inode force failure" {})))
+                    fs/sync-directory! (fn [_] (reset! parent-forced? true))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected inode force failure"
+                             (fs/create-exclusive! file))))
+      (is (false? @parent-forced?))
+      (finally (fs/remove-tree! root)))))
+
+(deftest leftover-created-ledger-must-force-the-inode-and-parent-on-retry
+  (doseq [phase [:inode :parent]]
+    (let [root (str "/tmp/clio-create-retry-" (host/random-uuid))
+          file (str root "/events.edn")
+          real-file! fs/force-file!
+          real-directory! fs/sync-directory!
+          trace (atom [])]
+      (try
+        (fs/ensure-dir! root)
+        (let [runtime (runtime/open (str root "/schemas") fixture/catalog)
+              revisions (:schema/revisions runtime)]
+          (with-redefs [fs/force-file! (fn [channel]
+                                        (if (= phase :inode)
+                                          (throw (ex-info "Injected creation refusal" {}))
+                                          (real-file! channel)))
+                        fs/sync-directory! (fn [_] (throw (ex-info "Injected creation refusal" {})))]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected creation refusal"
+                                 (ledger/create-ledger! file))))
+          (is (fs/exists? file))
+          (with-redefs [fs/sync-directory! (fn [_] (throw (ex-info "Injected retry parent refusal" {})))]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected retry parent refusal"
+                                 (ledger/ensure-durable! revisions file))))
+          (with-redefs [fs/force-file! (fn [channel] (swap! trace conj :inode) (real-file! channel))
+                        fs/sync-directory! (fn [path] (swap! trace conj path) (real-directory! path))]
+            (is (= file (ledger/ensure-durable! revisions file))))
+          (is (= [:inode root] @trace))
+          (let [fact (event/make-event (:schema/current runtime) :record/observed fixture/facts)]
+            (with-redefs [fs/sync-directory! (fn [_] (throw (ex-info "Injected append parent refusal" {})))]
+              (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Injected append parent refusal"
+                                   (ledger/append-event! revisions file fact))))
+            (is (= :already-present (ledger/append-event! revisions file fact)))
+            (is (= [fact] (ledger/read-ledger file)))))
+        (finally (fs/remove-tree! root))))))

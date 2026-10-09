@@ -1,4 +1,6 @@
-(ns clio.shape.canonical)
+(ns clio.shape.canonical
+  (:require [clio.shape.edn :as edn]
+            [clojure.string :as str]))
 
 (declare canonical-form)
 
@@ -146,6 +148,86 @@
     :else
     (canonical-real value)))
 
+(defn- canonical-uuid
+  [value]
+  (let [text (str/lower-case (str value))]
+    (when-not (re-matches #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" text)
+      (throw (ex-info "UUID must contain exactly 128 readable bits"
+                      {:clio/error :clio.canonical/invalid-uuid})))
+    [:uuid text]))
+
+(defn- canonical-instant
+  [value]
+  (let [millis (inst-ms value)
+        text (pr-str value)]
+    ;; EDN readers share four-digit Gregorian years, not Date's entire numeric
+    ;; range. Before 1582-10-15 the JVM printer's hybrid calendar disagrees with
+    ;; JavaScript's proleptic Gregorian calendar; year 10000 is not readable EDN.
+    (when-not (and (finite? millis) (<= -12219292800000 millis 253402300799999))
+      (throw (ex-info "Instant is outside the portable Gregorian EDN range (1582-10-15 through 9999)"
+                      {:clio/error :clio.canonical/invalid-instant})))
+    ;; Inst is extensible on the JVM. java.time.Instant and arbitrary protocol
+    ;; implementations print as #object, which cannot be persisted in this EDN
+    ;; ledger. Admit the standard #inst representation, not every Inst object.
+    (when-not (str/starts-with? text "#inst \"")
+      (throw (ex-info "Instant must have the standard EDN tagged representation"
+                      {:clio/error :clio.canonical/unsupported-value})))
+    ;; Inst is extensible. The standard tag alone does not prove a custom
+    ;; printer preserved the value. Validate the exact bytes admission writes.
+    (when-not (try (= millis (inst-ms (edn/read-one text)))
+                  (catch #?(:clj Exception :cljs :default) _ false))
+      (throw (ex-info "Instant does not round trip through tagged EDN"
+                      {:clio/error :clio.canonical/invalid-instant})))
+    [:inst (canonical-number millis)]))
+
+(defn- code-unit-between?
+  "Compare one UTF-16 code unit without a host-specific character representation."
+  [lower value upper]
+  (and (not (pos? (compare lower value)))
+       (not (pos? (compare value upper)))))
+
+(defn- invalid-unicode!
+  [offset]
+  (throw (ex-info "Canonical strings and identifiers must contain only Unicode scalars; unpaired UTF-16 surrogates are not portable"
+                  {:clio/error :clio.canonical/invalid-unicode :offset offset})))
+
+(defn- scalar-string!
+  "Retain valid UTF-16 exactly and reject unpaired surrogates before UTF-8 hashing.
+   Node replaces malformed units with U+FFFD while JVM encoders use '?'. Comparing
+   one-unit substrings keeps this linear scan identical on every supported host."
+  [value]
+  (let [length (count value)]
+    (loop [offset 0]
+      (when (< offset length)
+        (let [unit (subs value offset (inc offset))]
+          (cond
+            (code-unit-between? "\uD800" unit "\uDBFF")
+            (if (and (< (inc offset) length)
+                     (code-unit-between? "\uDC00" (subs value (inc offset) (+ offset 2)) "\uDFFF"))
+              (recur (+ offset 2))
+              (invalid-unicode! offset))
+
+            (code-unit-between? "\uDC00" unit "\uDFFF")
+            (invalid-unicode! offset)
+
+            :else (recur (inc offset)))))))
+  value)
+
+(defn- canonical-identifier
+  [tag value]
+  (when-let [identifier-namespace (namespace value)] (scalar-string! identifier-namespace))
+  (scalar-string! (name value))
+  (when-not
+   (try
+     (let [reread (edn/read-one (pr-str value))]
+       (and ((if (= tag :keyword) keyword? symbol?) reread)
+            (= (namespace value) (namespace reread))
+            (= (name value) (name reread))))
+     (catch #?(:clj Exception :cljs :default) _ false))
+    (throw (ex-info "Identifier does not round trip through persisted EDN"
+                    {:clio/error :clio.canonical/invalid-identifier})))
+  [tag (namespace value) (name value)])
+
 (defn canonical-form
   "Convert supported Clojure data into a deterministically ordered semantic
    form suitable for cross-runtime hashing. Equal sequential collections share
@@ -153,14 +235,18 @@
    identically on both runtimes: safe integers by their digits, finite shared
    reals by exact IEEE-754 decomposition; unsafe integers, JVM-only exact-real
    types, and NaN/Infinity are rejected rather than assigned ambiguous
-   cross-runtime identities."
+   cross-runtime identities. Strings and identifier components preserve Unicode
+   scalar sequences exactly; unpaired UTF-16 surrogates are rejected before a
+   host UTF-8 encoder can substitute a different value."
   [value]
   (cond
     (nil? value) [:nil]
     (boolean? value) [:boolean value]
-    (string? value) [:string value]
-    (keyword? value) [:keyword (namespace value) (name value)]
-    (symbol? value) [:symbol (namespace value) (name value)]
+    (string? value) [:string (scalar-string! value)]
+    (keyword? value) (canonical-identifier :keyword value)
+    (symbol? value) (canonical-identifier :symbol value)
+    (uuid? value) (canonical-uuid value)
+    (inst? value) (canonical-instant value)
     (number? value) (canonical-number value)
     (map? value) (canonical-map value)
     (set? value) (canonical-set value)

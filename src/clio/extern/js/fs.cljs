@@ -1,21 +1,67 @@
 (ns clio.extern.js.fs
   (:refer-clojure :exclude [exists?])
   (:require ["fs-ext-extra-prebuilt" :as fs-ext]
-            ["node:fs" :as fs]))
+            ["node:fs" :as fs]
+            ["node:path" :as node-path]))
 
 (defn exists?
   [path]
   (boolean (fs/existsSync path)))
 
-(defn ensure-dir!
+(defn absolute-path
+  "Resolve the existing target through the filesystem, preserving link/.. semantics."
   [path]
-  (fs/mkdirSync path #js {:recursive true})
+  ;; Node's JavaScript realpath implementation normalizes '..' before walking
+  ;; links. The native resolver follows the same filesystem semantics as open.
+  (.native ^js (.-realpathSync fs) path))
+
+(defn missing-path-error? [cause]
+  (= "ENOENT" (.-code cause)))
+
+(defn sync-directory!
+  "Force directory entries on the supported Linux filesystem; never acknowledge a weaker write."
+  [path]
+  (when-not (= "linux" (.-platform js/process))
+    (throw (ex-info "Node directory durability is unsupported on this platform"
+                    {:path path :clio/error :clio.fs/directory-sync-unavailable})))
+  (try
+    (let [flags (bit-or (.-O_RDONLY (.-constants fs)) (.-O_DIRECTORY (.-constants fs)))
+          fd (.openSync fs path flags)]
+      (try (.fsyncSync fs fd) (finally (.closeSync fs fd))))
+    (catch :default cause
+      (throw (ex-info "Node directory synchronization failed"
+                      {:path path :clio/error :clio.fs/directory-sync-unavailable} cause))))
   path)
+
+(defn- parent-path [path]
+  (.dirname node-path (.resolve node-path path)))
+
+(defn- ancestry [path]
+  (loop [directory (.resolve node-path path) result []]
+    (let [parent (parent-path directory) result (conj result directory)]
+      (if (= parent directory) result (recur parent result)))))
+
+(defn ensure-dir!
+  "Persist new ancestry, including existing ancestors left by a previously refused sync."
+  [path]
+  (let [parents (ancestry path)]
+    (sync-directory! (first (filter exists? parents)))
+    (.mkdirSync fs path #js {:recursive true})
+    (doseq [directory parents] (sync-directory! directory)))
+  path)
+
+(defn- sync-file! [fd path]
+  (try (.fsyncSync fs fd)
+       (catch :default cause
+         (throw (ex-info "Node file synchronization failed"
+                         {:path path :clio/error :clio.fs/file-sync-unavailable} cause)))))
 
 (defn create-exclusive!
   [path]
-  (let [fd (fs/openSync path "wx")]
-    (fs/closeSync fd))
+  (sync-directory! (parent-path path))
+  (let [fd (.openSync fs path "wx")]
+    (try (sync-file! fd path) (finally (.closeSync fs fd))))
+  (sync-directory! (parent-path path))
   path)
 
 (def ^:private locked-paths
@@ -25,19 +71,25 @@
    for that file, not only the one that took the lock. So opening a locked
    ledger a second time by path and closing it drops the lock silently — no
    error, no signal, just an unserialized critical section. read-text refuses
-   such a path rather than letting that happen.
+   such a path rather than letting that happen. Recorded device/inode identities
+   also refuse aliases before opening another descriptor."
+  (atom {}))
 
-   The guard keys on the path while the lock keys on the inode, so a hard-link
-   alias reaching the same inode under another name is not caught. Callers
-   inside a critical section must use read-locked-text regardless."
-  (atom #{}))
+(defn- stat-identity [^js stat]
+  [(str (.-dev stat)) (str (.-ino stat))])
+
+(defn- refuse-locked-path! [path]
+  (when (and (seq @locked-paths)
+             (or (contains? @locked-paths path)
+                 (let [identity (stat-identity (fs/statSync path #js {:bigint true}))]
+                   (some #(= identity %) (vals @locked-paths)))))
+    (throw (ex-info
+            "Path is locked by this process; read through read-locked-text"
+            {:path path :clio/error :clio.fs/locked-path-read}))))
 
 (defn read-text
   [path]
-  (when (contains? @locked-paths path)
-    (throw (ex-info
-            "Path is locked by this process; read through read-locked-text"
-            {:path path :clio/error :clio.fs/locked-path-read})))
+  (refuse-locked-path! path)
   (fs/readFileSync path "utf8"))
 
 (defn append-text!
@@ -47,12 +99,21 @@
 
 (defn write-text!
   [path text]
-  (fs/writeFileSync path text "utf8")
+  (sync-directory! (parent-path path))
+  (let [fd (.openSync fs path "w")]
+    (try
+      (.writeFileSync fs fd text "utf8")
+      (sync-file! fd path)
+      (finally (.closeSync fs fd))))
+  (sync-directory! (parent-path path))
   path)
 
 (defn rename!
   [from to]
-  (fs/renameSync from to)
+  (let [parents (distinct [(parent-path from) (parent-path to)])]
+    (doseq [directory parents] (sync-directory! directory))
+    (.renameSync fs from to)
+    (doseq [directory parents] (sync-directory! directory)))
   to)
 
 (defn hard-link!
@@ -106,7 +167,7 @@
   (contains? #{"ENOSYS" "ENOTSUP" "EOPNOTSUPP"} (.-code cause)))
 
 (defn- acquire-unix-lock!
-  [fd]
+  [fd read-only?]
   ;; flock gives open-file-description exclusion on local filesystems, which
   ;; also protects separate descriptors in one process. Some NFS mounts do not
   ;; implement flock, so unsupported-flock errors deliberately fall through.
@@ -115,20 +176,38 @@
   ;; advisory lock — "mandatory locking" is an unrelated, effectively dead
   ;; POSIX feature, not what F_SETLKW does.
   (try
-    (fs-ext/flockSync fd "ex")
+    (fs-ext/flockSync fd (if read-only? "sh" "ex"))
     (catch :default cause
       (when-not (unsupported-flock? cause)
         (throw cause))))
-  (fs-ext/fcntlSync fd "setlkw" (native-constant "F_WRLCK") 0 0))
+  (fs-ext/fcntlSync fd "setlkw" (native-constant (if read-only? "F_RDLCK" "F_WRLCK")) 0 0))
 
 (defn- acquire-native-lock!
-  [fd]
+  [fd read-only?]
   (if (windows?)
     (fs-ext/lockFileExSync
      fd
-     (native-constant "LOCKFILE_EXCLUSIVE_LOCK")
+     (if read-only? 0 (native-constant "LOCKFILE_EXCLUSIVE_LOCK"))
      0 0 0xffffffff 0xffffffff)
-    (acquire-unix-lock! fd)))
+    (acquire-unix-lock! fd read-only?)))
+
+(defn- acquire-lock-mode!
+  [path read-only?]
+  ;; Bind the resolved target before opening it: a later symlink retarget must
+  ;; not move the parent fence away from the inode owned by this descriptor.
+  (let [target-path (absolute-path path)
+        _ (refuse-locked-path! target-path)
+        flags (if read-only?
+                (.-O_RDONLY (.-constants fs))
+                (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs))))
+        fd (.openSync fs target-path flags)]
+    (try
+      (acquire-native-lock! fd read-only?)
+      (swap! locked-paths assoc target-path (stat-identity (fs/fstatSync fd #js {:bigint true})))
+      {:lock/path path :lock/target-path target-path :lock/fd fd}
+      (catch :default cause
+        (fs/closeSync fd)
+        (throw cause)))))
 
 (defn acquire-lock!
   "Open an existing ledger and hold an OS-backed exclusive lock on its inode.
@@ -153,15 +232,16 @@
    here and appended to as an empty history. create-ledger! is the only
    creation path; an absent ledger fails with ENOENT."
   [path]
-  (let [flags (bit-or (.-O_APPEND (.-constants fs)) (.-O_RDWR (.-constants fs)))
-        fd (fs/openSync path flags)]
-    (try
-      (acquire-native-lock! fd)
-      (swap! locked-paths conj path)
-      {:lock/path path :lock/fd fd}
-      (catch :default cause
-        (fs/closeSync fd)
-        (throw cause)))))
+  (acquire-lock-mode! path false))
+
+(defn acquire-read-lock!
+  "Open an existing ledger read-only and hold a shared lock against exclusive writers.
+
+   Unix uses shared flock plus an authoritative whole-file POSIX read lock;
+   Windows uses shared LockFileEx. The same inode guard, owning-descriptor read
+   and release operation apply. This never creates storage or upgrades access."
+  [path]
+  (acquire-lock-mode! path true))
 
 (defn read-locked-text
   "Read the locked ledger through the same descriptor that owns the lock."
@@ -169,14 +249,23 @@
   (fs/readFileSync fd "utf8"))
 
 (defn append-locked-text!
-  "Append through the descriptor that owns the kernel lock."
-  [{:lock/keys [fd path]} text]
+  "Append and force the owning inode, then its directory entry, before acknowledgment."
+  [{:lock/keys [fd path target-path]} text]
   (fs/appendFileSync fd text "utf8")
+  (.fsyncSync fs fd)
+  (sync-directory! (parent-path target-path))
+  path)
+
+(defn sync-locked!
+  "Reflush the locked inode and parent, including an uncertain earlier creation."
+  [{:lock/keys [fd path target-path]}]
+  (.fsyncSync fs fd)
+  (sync-directory! (parent-path target-path))
   path)
 
 (defn release-lock!
   "Close the owning descriptor. Kernel file locks are released by close."
-  [{:lock/keys [fd path]}]
-  (swap! locked-paths disj path)
+  [{:lock/keys [fd target-path]}]
+  (swap! locked-paths dissoc target-path)
   (fs/closeSync fd)
   nil)
