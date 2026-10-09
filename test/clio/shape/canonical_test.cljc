@@ -167,3 +167,20 @@
   ;; runtimes must refuse it rather than disagreeing.
   (is (= :clio.canonical/non-portable-number
          (error-code #(canonical/canonical-edn {:too-big 1e20})))))
+
+;; Babashka cannot construct java.sql.Timestamp, so this JVM law runs on Clojure only.
+#?(:bb nil
+   :clj
+   (deftest sub-millisecond-timestamps-are-refused-before-hashing
+     (let [millis 1791763200001
+           at (fn [nanos] (doto (java.sql.Timestamp. millis) (.setNanos nanos)))
+           coarse (at 1000000)
+           fine-a (at 1000001)
+           fine-b (at 1999999)]
+       (is (= (inst-ms fine-a) (inst-ms fine-b))
+           "Both values share a millisecond, so the hash alone cannot tell them apart")
+       (is (= :clio.canonical/invalid-instant (error-code #(canonical/canonical-edn fine-a))))
+       (is (= :clio.canonical/invalid-instant (error-code #(canonical/canonical-edn fine-b))))
+       (is (= (canonical/canonical-edn #inst "2026-10-12T00:00:00.001Z")
+              (canonical/canonical-edn coarse))
+           "A millisecond-precise Timestamp keeps the standard #inst preimage"))))
