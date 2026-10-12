@@ -1,4 +1,4 @@
-;; Consumable ClojureScript dependency metadata for @eta-mu/clio.
+;; Consumable Clojure/ClojureScript dependency metadata for @eta-mu/clio.
 ;;
 ;; The npm manifest can only declare the package's JavaScript dependencies, so
 ;; a consumer adding this package's `src` tree to its ClojureScript source
@@ -6,10 +6,11 @@
 ;; actually requires. This file is that record, shipped in the npm tarball, and
 ;; it is the same set the monorepo builds and tests against.
 ;;
-;; It is deliberately tool-neutral: shadow-cljs.edn here declares its own
-;; :dependencies rather than :deps true, and NBB reads nbb.edn, so nothing in
-;; this repository resolves through this file.
+;; Shadow CLJS declares the same dependencies directly; NBB reads nbb.edn.
+;; JVM consumers can use this directory directly as a :local/root dependency.
 {:paths ["src"]
  :deps {metosin/malli {:mvn/version "0.16.4"}
         borkdude/edamame {:mvn/version "1.6.42"}
-        funcool/promesa {:mvn/version "11.0.678"}}}
+        funcool/promesa {:mvn/version "11.0.678"}}
+ :aliases {:test {:extra-paths ["test" "scripts"]
+                  :main-opts ["-m" "clio.jvm-test-runner"]}}}

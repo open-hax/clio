@@ -156,8 +156,11 @@ law -> shape -> extern -> domain -> infra
 - `clio.extern.js.*` — the only Clio namespace family that touches Node/JS
   libraries or builtins. Functions accept Clojure data and return Clojure data;
   Node handles and JS option objects stay inside the boundary (`.cljs`).
-- `clio.infra.*` — NBB/Node orchestration over the pure kernel and boundary
-  functions (`.cljs`).
+- `clio.extern.jvm.*` — JVM filesystem, SHA-256, UUID and wall-clock adapters
+  (`.clj`). File channels and kernel locks remain private to this boundary.
+- `clio.infra.*` — shared event, ledger, schema-history and projection
+  orchestration (`.cljc`), selecting host adapters with reader conditionals.
+  The CLI alone remains Node-specific (`.cljs`).
 - `bin/*.nbb` and `test/*.nbb` — thin NBB executable entrypoints only.
 - `bin/clio.mjs` — the published npm executable. It is a launcher, not logic:
   see [Consuming from npm](#consuming-from-npm).
@@ -212,6 +215,13 @@ Clio has no stale lockfile, lease timeout, PID-reclamation protocol, or
 application-level fencing race. Symlink and hard-link aliases therefore contend
 on the same underlying file identity rather than on path-derived lock names.
 
+`read-ledger` and each partition snapshot in `read-ledgers` use a read-only
+descriptor with a shared lock. On Unix this is a POSIX read lock plus shared
+`flock` in Node, or a shared `FileChannel` lock on the JVM. Read-only replay thus
+needs no write permission and still waits for participating exclusive writers
+to finish. The reader parses through the descriptor that owns its lock, then
+releases it. This is a per-file snapshot, not one transaction across files.
+
 Whether a candidate event may join a partition is a law, not transport.
 `clio.law.ledger/append-admission` classifies it against the events already
 present — `:appendable`, `:already-present`, `:id-collision`, or
@@ -227,10 +237,55 @@ becoming a fresh empty history while the intended ledger stays behind.
 
 A POSIX record lock is released when the process closes *any* descriptor for
 that file, not only the one that took the lock. Path-based `read-text` would
-therefore drop a held lock silently, so `clio.extern.js.fs` tracks the paths
-this process has locked and refuses that read outright; callers inside a
-critical section use `read-locked-text`. The guard keys on the path while the
-lock keys on the inode, so a hard-link alias under another name is not caught.
+therefore drop a held lock silently, so `clio.extern.js.fs` tracks the paths and
+exact device/inode identities this process has locked. It refuses path reads
+and lock reentry through the same path or an alias before opening another
+descriptor; callers inside a critical section use `read-locked-text`.
+
+The JVM adapter uses `FileChannel.lock` on the same existing inode. On Unix
+this participates in the Node adapter's authoritative POSIX record-lock
+protocol; mixed JVM/Node writers therefore share admission and collision
+semantics. An in-process JVM guard serializes descriptor acquisition before
+opening files, and refuses path reads through hard-link aliases while locked.
+This intentionally trades concurrency for simpler local development behavior.
+Filesystems without stable file identity are rejected instead of substituting
+path identity, which would make hard-link aliases unsafe.
+Both adapters flush appended data (`fsync` / `FileChannel.force`) before
+returning success. Atomic rename is required for projection replacement; a
+filesystem that cannot provide it fails rather than silently downgrading.
+
+Both schema writers synchronize temporary file contents before atomic rename,
+force affected parent directories before and after publication, and persist
+newly created directory ancestry. Empty ledger creation also synchronizes its
+inode and parent before returning success. This directory durability contract
+is supported on Linux filesystems that allow directory synchronization; the
+Node adapter uses `fsync` on a read-only directory descriptor and the JVM adapter
+uses the default POSIX provider's read-only directory channel.
+Unsupported hosts or failed directory forces raise
+`:clio.fs/directory-sync-unavailable`; no successful schema publication is
+reported. A force failure after the move can leave the new path present, but
+the caller still receives failure and must not acknowledge dependent events.
+The Node adapter resynchronizes existing ancestry on retry, including directories
+left present by a previously refused force. Tests observe real filesystem calls,
+inject file and directory synchronization failures, and verify that no dependent
+event is admitted. These tests establish syscall sequencing and failure handling;
+they do not simulate physical power loss or storage hardware guarantees.
+
+An append can leave its complete event visible even though inode or directory
+synchronization failed. `runtime/append!` retains the exact generated event in
+the exception data as `:clio/append-recovery`, a map containing `:ledger/path`
+(an absolute path) and `:event`. Preserve this EDN if recovery must survive a
+process restart. After addressing the underlying failure, explicitly call
+`(runtime/retry-append! rt recovery)`. It reloads historical schema revisions
+and retries that event without generating another UUID or timestamp. An exact
+visible event returns `:already-present` only after validation and both
+durability fences succeed. Errors retain the same recovery data and their
+original cause; a token does not certify that the event was admitted.
+
+Retries still refuse changed event bytes, competing stream slots, missing
+ledgers, unknown schemas and corrupt history. A partially written EDN record
+requires explicit investigation; this API does not guess missing bytes or
+repair corruption automatically.
 
 `clio.domain.canonicalize/canonicalize` performs:
 
@@ -277,6 +332,18 @@ npx clio append \
     :event/data {:amount 10}}'
 ```
 
+If append fails after constructing its event, the CLI exits with status 1 and
+prints the error plus EDN data to stderr. Pass the **value** of
+`:clio/append-recovery` unchanged to the explicit recovery command:
+
+```bash
+npx clio retry-append .clio/schemas '<append-recovery-edn>'
+```
+
+This command uses the stored historical schema and event identity; it does not
+require the current catalog. Failure leaves stdout empty. Success prints the
+same `:append/result` and `:event` shape as `append`.
+
 Canonicalize arbitrarily partitioned ledgers:
 
 ```bash
@@ -312,17 +379,81 @@ actually requires — the same versions this repository builds and tests against
 Under Shadow CLJS, add them to `:dependencies`; under NBB, note that edamame and
 promesa are bundled with nbb, so only Malli needs declaring, as `nbb.edn` shows.
 
+## Consuming from JVM Clojure
+
+Use the same package as a local dependency; there is no second ledger package:
+
+```clojure
+{:deps {open-hax/clio {:local/root "../clio"}}}
+```
+
+The event, schema-store, ledger, runtime and projection APIs are identical
+across JVM Clojure, NBB and compiled Node ClojureScript:
+
+```clojure
+(require '[clio.infra.runtime :as runtime]
+         '[clio.infra.ledger :as ledger]
+         '[clio.law.schema :as schema])
+
+(def catalog
+  {:note/recorded
+   (schema/event-schema
+    :note/recorded
+    [:map {:closed true} [:note/id :uuid] [:observed/at 'inst?] [:text :string]])})
+
+(ledger/create-ledger! "events.edn") ; Explicit, exclusive creation; run once.
+(def rt (runtime/open ".clio/schemas" catalog))
+(runtime/append!
+ rt "events.edn" :note/recorded
+ {:event/stream "note:1" :event/seq 1 :event/causes []
+  :event/actor "developer" :event/subject "note:1"
+  :event/data {:note/id #uuid "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+               :observed/at #inst "2026-09-11T00:00:00.000Z"
+               :text "Recorded locally"}})
+(ledger/canonicalize-files (:schema/revisions rt) ["events.edn"])
+```
+
+Standard EDN `#uuid` and `#inst` payloads retain their types. Their canonical
+forms use lowercase UUID text and signed epoch milliseconds, respectively.
+These additions preserve all previously supported values' canonical bytes;
+they do not reinterpret an existing hash. The shared instant range is
+`1582-10-15T00:00:00.000Z` through `9999-12-31T23:59:59.999Z`, inclusive.
+Earlier values encounter the JVM printer's Julian/Gregorian cutover; later years
+exceed the common four-digit EDN reader grammar. Admission also checks the exact
+tagged print/read round trip. Refused values remain representable as explicit
+application strings, but cannot enter an event as canonical instants.
+Arbitrary host objects remain invalid.
+Keyword and symbol constructors can also produce names that their EDN printer
+cannot preserve. Admission requires the printed identifier to read back as
+exactly one value of the same kind, namespace and name. Whitespace, delimiters,
+reserved symbol literals and ambiguous constructor namespaces are refused
+before append; valid identifiers retain their existing canonical bytes. This
+also protects generic JavaScript records whose property names become keywords.
+Strings and both identifier components must contain Unicode scalar values:
+UTF-16 high surrogates require an immediately following low surrogate, and a
+low surrogate cannot stand alone. Malformed strings are refused with
+`:clio.canonical/invalid-unicode` before hashing or persistence; the error's
+`:offset` identifies the malformed code unit. Node and JVM UTF-8 encoders
+otherwise replace those units differently. Valid BMP characters, supplementary
+pairs and literal replacement characters retain their exact preimages. No
+Unicode normalization or lossy replacement is performed.
+Malli's data-only predicate symbol `inst?` expresses the instant contract;
+`:inst` is not in its default registry. Use quoted symbols in authored schema
+code so persisted catalogs contain data rather than runtime function objects.
+
 ## Verification
 
 ```bash
-pnpm --dir packages/clio lint
-pnpm --dir packages/clio test
+pnpm lint
+pnpm test
 ```
 
-The kernel suite runs under both NBB and Shadow CLJS. A third Babashka runner
-(`test/run.bb`) pins what only a JVM runtime can: that canonical encoding is
-byte-identical across hosts. The boundary-lint rules are runtime-neutral and run
-under all three. Its
+The kernel suite runs under NBB, Shadow CLJS and JVM Clojure. The lightweight
+Babashka runner (`test/run.bb`) also pins the portable canonical and admission
+laws. JVM integration tests start actual NBB peers: each host blocks while
+the other owns the ledger inode, a colliding writer observes the committed
+winner, and both hosts reproduce identical schema roots and typed projections.
+The boundary-lint rules are runtime-neutral and run under all four. Its
 partition-invariance
 fixture exhaustively checks all 24 permutations of four causally related events
 across all `3^4 = 81` assignments to three physical ledgers: 1,944 distinct
@@ -337,7 +468,7 @@ proves a contender blocks while another process holds the inode lock; another
 starts colliding appenders through different names for the same inode and proves
 that only one stream-slot write commits.
 
-PR-time verification runs in `main-pr-gate.yml`'s `clio` job; there is no
+PR-time verification runs in `.github/workflows/clio-ci.yml`; there is no
 package-local CI receipt file.
 
 ## License

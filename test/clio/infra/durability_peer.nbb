@@ -1,0 +1,13 @@
+(ns clio.infra.durability-peer
+  (:require [clio.extern.js.fs :as fs]
+            [clio.infra.host-fixture :as fixture]
+            [clio.infra.ledger :as ledger]
+            [clio.infra.runtime :as runtime]))
+
+(let [[directory] *command-line-args*
+      path (str directory "/events.edn")
+      schemas (str directory "/nested/schemas")]
+  (fs/ensure-dir! directory)
+  (ledger/create-ledger! path)
+  (let [result (runtime/append! (runtime/open schemas fixture/catalog) path :record/observed fixture/facts)]
+    (println (pr-str (select-keys result [:append/result :event])))))

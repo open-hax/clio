@@ -5,6 +5,7 @@
   {:new [:tuple :string]
    :schema-root [:tuple :string]
    :append [:tuple :string :string :string :string :string]
+   :retry-append [:tuple :string :string]
    :canonicalize
    [:and
     [:vector :string]

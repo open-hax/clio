@@ -51,3 +51,29 @@
         (catch :default cause
           (is false (str "kernel lock setup failed: " cause))
           (finish))))))
+
+(deftest shared-descriptor-refuses-writes-and-reentry-even-with-write-permission
+  (let [directory (str "/tmp/clio-read-lock-" (host/random-uuid))
+        path (str directory "/events.edn")
+        alias (str directory "/read-alias.edn")]
+    (try
+      (fs/ensure-dir! directory)
+      (fs/write-text! path "retained")
+      (fs/hard-link! path alias)
+      (let [lock (fs/acquire-read-lock! path)]
+        (try
+          (is (= "retained" (fs/read-locked-text lock)))
+          (is (re-find #"EBADF" (try (fs/append-locked-text! lock "corruption") "unexpected success"
+                                   (catch :default cause (ex-message cause)))))
+          (doseq [candidate [path alias]
+                  acquire! [fs/acquire-read-lock! fs/acquire-lock!]]
+            (is (= :clio.fs/locked-path-read
+                   (try (acquire! candidate) :unexpected-success
+                        (catch :default cause (:clio/error (ex-data cause)))))))
+          (finally (fs/release-lock! lock))))
+      (is (= "retained" (fs/read-text path)))
+      (let [writer (fs/acquire-lock! path)]
+        (try (fs/append-locked-text! writer " after release")
+             (finally (fs/release-lock! writer))))
+      (is (= "retained after release" (fs/read-text path)))
+      (finally (fs/remove-tree! directory)))))
