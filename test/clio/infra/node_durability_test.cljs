@@ -320,3 +320,18 @@
                 "New appends must preserve the parent fence too")
             (is (= :already-present (ledger/append-event! revisions path fact)))
             (is (= [fact] (ledger/read-ledger path)))))))))
+
+(deftest unsupported-directory-durability-refuses-an-append-before-writing
+  (with-directory
+    (fn [directory]
+      (let [target (str directory "/events.edn")]
+        (ledger/create-ledger! target)
+        (let [lock (fs/acquire-lock! target)]
+          (try
+            (is (= :clio.fs/directory-sync-unavailable
+                   (observer/with-platform
+                     "unsupported"
+                     #(error-code (fn [] (fs/append-locked-text! lock "never-visible")))))
+                "An unsupported host must refuse before the event becomes visible")
+            (finally (fs/release-lock! lock))))
+        (is (= "" (fs/read-text target)) "No event text was written")))))

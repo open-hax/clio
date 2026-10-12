@@ -39,3 +39,13 @@
            (set! (.-fsyncSync native) original-sync)
            (set! (.-renameSync native) original-rename)
            (syncBuiltinESMExports)))))
+
+(defn with-platform
+  "Run operation while process.platform reports platform, then restore the host value."
+  [platform operation]
+  (let [original (.-platform js/process)
+        define! (fn [value]
+                  (js/Object.defineProperty js/process "platform"
+                                            #js {:value value :configurable true}))]
+    (define! platform)
+    (try (operation) (finally (define! original)))))

@@ -178,6 +178,13 @@
                   (catch #?(:clj Exception :cljs :default) _ false))
       (throw (ex-info "Instant does not round trip through tagged EDN"
                       {:clio/error :clio.canonical/invalid-instant})))
+    ;; The canonical preimage is millisecond-precise. java.sql.Timestamp prints
+    ;; nine fractional digits, so a sub-millisecond value would persist a
+    ;; distinction that the hash erases. Refuse it rather than truncate silently.
+    #?(:clj (when (and (instance? java.sql.Timestamp value)
+                       (not (zero? (mod (.getNanos ^java.sql.Timestamp value) 1000000))))
+              (throw (ex-info "Instant precision exceeds the canonical millisecond"
+                              {:clio/error :clio.canonical/invalid-instant}))))
     [:inst (canonical-number millis)]))
 
 (defn- code-unit-between?

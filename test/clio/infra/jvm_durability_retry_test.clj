@@ -278,3 +278,23 @@
             (is (= :already-present (ledger/append-event! revisions file fact)))
             (is (= [fact] (ledger/read-ledger file)))))
         (finally (fs/remove-tree! root))))))
+
+(deftest unsupported-directory-durability-refuses-an-append-before-writing
+  (let [root (str "/tmp/clio-unsupported-append-" (host/random-uuid))
+        target (str root "/events.edn")
+        os-name (System/getProperty "os.name")]
+    (try
+      (fs/ensure-dir! root)
+      (ledger/create-ledger! target)
+      (let [lock (fs/acquire-lock! target)]
+        (try
+          (System/setProperty "os.name" "Unsupported")
+          (is (= :clio.fs/directory-sync-unavailable
+                 (try (fs/append-locked-text! lock "never-visible") nil
+                      (catch Exception cause (:clio/error (ex-data cause)))))
+              "An unsupported host must refuse before the event becomes visible")
+          (finally
+            (System/setProperty "os.name" os-name)
+            (fs/release-lock! lock))))
+      (is (= "" (fs/read-text target)) "No event text was written")
+      (finally (fs/remove-tree! root)))))

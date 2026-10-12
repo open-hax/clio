@@ -468,7 +468,7 @@ proves a contender blocks while another process holds the inode lock; another
 starts colliding appenders through different names for the same inode and proves
 that only one stream-slot write commits.
 
-PR-time verification runs in `main-pr-gate.yml`'s `clio` job; there is no
+PR-time verification runs in `.github/workflows/clio-ci.yml`; there is no
 package-local CI receipt file.
 
 ## License
