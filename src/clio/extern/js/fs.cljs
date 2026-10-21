@@ -173,12 +173,12 @@
   (atom nil))
 
 (defn- existing-file-anchor
-  "Real path of an existing file argument, so npm bin symlinks resolve from
+  "Real path of an existing file argument (relative ones against cwd), so npm bin symlinks resolve from
    the installed package rather than the consumer's .bin directory."
   [candidate]
-  (when (and (string? candidate) (.isAbsolute node-path candidate))
+  (when (string? candidate)
     (try
-      (let [real (.native ^js (.-realpathSync fs) candidate)]
+      (let [real (.native ^js (.-realpathSync fs) (.resolve node-path candidate))]
         (when (.isFile (fs/statSync real)) real))
       (catch :default _ nil))))
 
@@ -214,7 +214,8 @@
                             {:module native-lock-module-name
                              :anchors (vec anchors)
                              :clio/error :clio.fs/native-lock-unavailable}
-                            (last causes)))
+                            (or (first (remove #(= "MODULE_NOT_FOUND" (.-code %)) causes))
+                                (first causes))))
             (let [result (try {:module (require-from anchor)}
                               (catch :default cause {:cause cause}))]
               (if (contains? result :module)

@@ -1,10 +1,16 @@
 (ns clio.infra.lazy-native-test
+  "Mapping evidence is Linux-only (/proc/self/maps); elsewhere the probe
+   reports nil for it and only Clio's loaded flag is asserted."
   (:require [cljs.test :refer [async deftest is testing]]
             [clio.extern.js.fs :as fs]
+            [clio.extern.js.fs-observer :as observer]
             [clio.extern.js.process :as process]
             [clio.extern.js.runtime :as host]
             [clio.shape.edn :as edn]
             [promesa.core :as p]))
+
+(defn- expected [loaded?]
+  [loaded? (when (observer/maps-available?) loaded?)])
 
 (deftest importing-ledger-stack-does-not-load-native-binding
   (async done
@@ -23,9 +29,9 @@
             (testing "the probe exits cleanly"
               (is (zero? (:exit-code result)) (:stderr result)))
             (testing "namespace load leaves the binding unloaded and unmapped"
-              (is (= [false false] (:before report))))
+              (is (= (expected false) (:before report))))
             (testing "the first lock loads and maps the binding"
-              (is (= [true true] (:after report))))
+              (is (= (expected true) (:after report))))
             (finish))
           (p/catch (fn [cause]
                      (is false (str "lazy native probe failed: " cause))
@@ -49,7 +55,7 @@
                                   ledger-file]})
                   report (edn/read-one (:stdout result))]
             (is (zero? (:exit-code result)) (:stderr result))
-            (is (= [true true] (:after report)))
+            (is (= (expected true) (:after report)))
             (finish))
           (p/catch (fn [cause]
                      (is false (str "out-of-tree probe failed: " cause))
