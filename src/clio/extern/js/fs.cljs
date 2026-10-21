@@ -169,13 +169,12 @@
   (atom nil))
 
 (defn- host-require
-  "CommonJS require for the current host. Shadow :node targets expose
-   js/require; ESM hosts (NBB, shadow :esm) resolve from the process
-   working directory, where the embedding application installs Clio's deps."
+  "CommonJS require resolving from the process working directory, where the
+   embedding application installs Clio's dependencies. node:module's
+   createRequire is used on every host: shadow :esm output defines its own
+   js/require shim that only knows bundled modules, so it cannot be probed."
   []
-  (if (exists? js/require)
-    js/require
-    (node-module/createRequire (str (.cwd js/process) "/"))))
+  (node-module/createRequire (str (.cwd js/process) "/")))
 
 (defn- ^js load-native-lock-module!
   []
