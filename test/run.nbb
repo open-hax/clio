@@ -7,6 +7,7 @@
             [clio.extern.js.process :as process]
             [clio.infra.cli-test]
             [clio.infra.kernel-lock-test]
+            [clio.infra.lazy-native-test]
             [clio.infra.ledger-test]
             [clio.infra.node-durability-test]
             [clio.law.ledger-test]
@@ -26,6 +27,7 @@
  'clio.lint-extern-boundary-test
  'clio.infra.cli-test
  'clio.infra.kernel-lock-test
+ 'clio.infra.lazy-native-test
  'clio.infra.ledger-test
  'clio.infra.node-durability-test
  'clio.shape.canonical-test

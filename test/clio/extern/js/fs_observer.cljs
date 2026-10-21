@@ -49,3 +49,12 @@
                                             #js {:value value :configurable true}))]
     (define! platform)
     (try (operation) (finally (define! original)))))
+
+(defn maps-available? [] (= "linux" (.-platform js/process)))
+
+(defn native-binding-mapped?
+  "Linux evidence that a shared object named like `fragment` is dlopen'ed;
+   nil on hosts without /proc/self/maps."
+  [fragment]
+  (when (maps-available?)
+    (boolean (re-find (re-pattern fragment) (.readFileSync native "/proc/self/maps" "utf8")))))
