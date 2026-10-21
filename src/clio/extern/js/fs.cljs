@@ -168,24 +168,58 @@
   ;; dlopen a prebuilt .node file on hosts that never take a ledger lock.
   (atom nil))
 
-(defn- host-require
-  "CommonJS require resolving from the process working directory, where the
-   embedding application installs Clio's dependencies. node:module's
-   createRequire is used on every host: shadow :esm output defines its own
-   js/require shim that only knows bundled modules, so it cannot be probed."
+(defonce ^:private native-lock-anchor
+  ;; Optional host-chosen resolution base, set by load-native-locks!.
+  (atom nil))
+
+(defn- existing-file-anchor
+  "Real path of an existing file argument, so npm bin symlinks resolve from
+   the installed package rather than the consumer's .bin directory."
+  [candidate]
+  (when (and (string? candidate) (.isAbsolute node-path candidate))
+    (try
+      (let [real (.native ^js (.-realpathSync fs) candidate)]
+        (when (.isFile (fs/statSync real)) real))
+      (catch :default _ nil))))
+
+(defn- resolution-anchors
+  "Where the binding may be installed, most specific first: an explicit
+   anchor; existing files named on the command line, in order (the entry
+   script, and for NBB the script after nbb's own options — bin/clio.mjs
+   passes bin/clio.nbb inside the installed package); then the working
+   directory. Resolution is
+   relative to the anchor, never the caller's cwd alone, so a CLI or script
+   run from elsewhere still finds the dependency installed beside it."
   []
-  (node-module/createRequire (str (.cwd js/process) "/")))
+  (let [argv (vec (.-argv js/process))]
+    (->> (concat [@native-lock-anchor]
+                 (map existing-file-anchor (rest argv))
+                 [(str (.cwd js/process) "/")])
+         (remove nil?)
+         distinct)))
+
+(defn- require-from
+  ;; node:module createRequire on every host: shadow :esm output defines a
+  ;; js/require shim that only knows bundled modules, so it is never probed.
+  [anchor]
+  ((node-module/createRequire anchor) native-lock-module-name))
 
 (defn- ^js load-native-lock-module!
   []
   (or @native-lock-module
-      (try
-        (reset! native-lock-module ((host-require) native-lock-module-name))
-        (catch :default cause
-          (throw (ex-info "Native ledger lock binding is unavailable"
-                          {:module native-lock-module-name
-                           :clio/error :clio.fs/native-lock-unavailable}
-                          cause))))))
+      (let [anchors (resolution-anchors)]
+        (loop [[anchor & more] anchors causes []]
+          (if (nil? anchor)
+            (throw (ex-info "Native ledger lock binding is unavailable"
+                            {:module native-lock-module-name
+                             :anchors (vec anchors)
+                             :clio/error :clio.fs/native-lock-unavailable}
+                            (last causes)))
+            (let [result (try {:module (require-from anchor)}
+                              (catch :default cause {:cause cause}))]
+              (if (contains? result :module)
+                (reset! native-lock-module (:module result))
+                (recur more (conj causes (:cause result))))))))))
 
 (defn native-locks-loaded?
   "True once the native lock binding has been loaded by a lock or preload."
@@ -195,14 +229,18 @@
 (defn load-native-locks!
   "Optional async preload of the native lock binding. Resolves to true, or
    rejects with :clio.fs/native-lock-unavailable. Locks load it on demand
-   anyway; this lets a host surface a missing binding at a chosen time."
-  []
-  (js/Promise.
-   (fn [resolve reject]
-     (try
-       (load-native-lock-module!)
-       (resolve true)
-       (catch :default cause (reject cause))))))
+   anyway; this lets a host surface a missing binding at a chosen time.
+   `:resolve-from` (an absolute file or directory path ending in /) names
+   where the host installed the dependency and is tried first."
+  ([] (load-native-locks! {}))
+  ([{:keys [resolve-from]}]
+   (js/Promise.
+    (fn [resolve reject]
+      (try
+        (when resolve-from (reset! native-lock-anchor resolve-from))
+        (load-native-lock-module!)
+        (resolve true)
+        (catch :default cause (reject cause)))))))
 
 (defn- native-constant
   [name]

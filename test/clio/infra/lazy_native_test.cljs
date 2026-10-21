@@ -31,6 +31,30 @@
                      (is false (str "lazy native probe failed: " cause))
                      (finish)))))))
 
+(deftest lazy-binding-resolves-from-the-script-not-the-caller-cwd
+  (async done
+    (let [directory (str "/tmp/clio-lazy-cwd-" (host/random-uuid))
+          ledger-file (str directory "/events.edn")
+          root (process/cwd)
+          finish (fn [] (fs/remove-tree! directory) (done))]
+      (fs/ensure-dir! directory)
+      (fs/create-exclusive! ledger-file)
+      ;; cwd has no node_modules: only the script's install location does.
+      (-> (p/let [result (process/run-command!
+                          {:command "node"
+                           :cwd directory
+                           :args [(str root "/node_modules/nbb/cli.js")
+                                  "-cp" (str root "/src:" root "/test")
+                                  (str root "/test/clio/infra/lazy_native_probe.nbb")
+                                  ledger-file]})
+                  report (edn/read-one (:stdout result))]
+            (is (zero? (:exit-code result)) (:stderr result))
+            (is (= [true true] (:after report)))
+            (finish))
+          (p/catch (fn [cause]
+                     (is false (str "out-of-tree probe failed: " cause))
+                     (finish)))))))
+
 (deftest preload-resolves-and-is-idempotent
   (async done
     (-> (p/let [first-load (fs/load-native-locks!)
