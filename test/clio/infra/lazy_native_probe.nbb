@@ -1,0 +1,20 @@
+#!/usr/bin/env nbb
+
+(ns clio.infra.lazy-native-probe
+  "Child probe: importing the whole Node ledger stack must not dlopen the
+   fs-ext binding; the first lock must. Evidence is /proc/self/maps (the
+   shared objects actually mapped) plus Clio's own loaded flag."
+  (:require [clio.extern.js.fs :as fs]
+            [clio.extern.js.fs-observer :as observer]
+            [clio.infra.ledger]
+            [clio.infra.runtime]))
+
+(defn- binding-mapped? []
+  (observer/native-binding-mapped? "fs-ext"))
+
+(let [[ledger-file] *command-line-args*
+      before [(fs/native-locks-loaded?) (binding-mapped?)]
+      lock (fs/acquire-lock! ledger-file)
+      after (try [(fs/native-locks-loaded?) (binding-mapped?)]
+                 (finally (fs/release-lock! lock)))]
+  (println (pr-str {:before before :after after})))

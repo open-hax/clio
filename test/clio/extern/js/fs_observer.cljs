@@ -49,3 +49,8 @@
                                             #js {:value value :configurable true}))]
     (define! platform)
     (try (operation) (finally (define! original)))))
+
+(defn native-binding-mapped?
+  "Linux evidence that a shared object named like `fragment` is dlopen'ed."
+  [fragment]
+  (boolean (re-find (re-pattern fragment) (.readFileSync native "/proc/self/maps" "utf8"))))

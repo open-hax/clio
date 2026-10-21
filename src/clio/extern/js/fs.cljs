@@ -1,7 +1,7 @@
 (ns clio.extern.js.fs
   (:refer-clojure :exclude [exists?])
-  (:require ["fs-ext-extra-prebuilt" :as fs-ext]
-            ["node:fs" :as fs]
+  (:require ["node:fs" :as fs]
+            ["node:module" :as node-module]
             ["node:path" :as node-path]))
 
 (defn exists?
@@ -160,9 +160,54 @@
                              {:path path :timeout-ms timeout-ms}))))]
          (poll))))))
 
+(def ^:private native-lock-module-name "fs-ext-extra-prebuilt")
+
+(defonce ^:private native-lock-module
+  ;; The native binding is loaded on the first lock, never at namespace load:
+  ;; importing clio.extern.js.fs (and everything that requires it) must not
+  ;; dlopen a prebuilt .node file on hosts that never take a ledger lock.
+  (atom nil))
+
+(defn- host-require
+  "CommonJS require for the current host. Shadow :node targets expose
+   js/require; ESM hosts (NBB, shadow :esm) resolve from the process
+   working directory, where the embedding application installs Clio's deps."
+  []
+  (if (exists? js/require)
+    js/require
+    (node-module/createRequire (str (.cwd js/process) "/"))))
+
+(defn- ^js load-native-lock-module!
+  []
+  (or @native-lock-module
+      (try
+        (reset! native-lock-module ((host-require) native-lock-module-name))
+        (catch :default cause
+          (throw (ex-info "Native ledger lock binding is unavailable"
+                          {:module native-lock-module-name
+                           :clio/error :clio.fs/native-lock-unavailable}
+                          cause))))))
+
+(defn native-locks-loaded?
+  "True once the native lock binding has been loaded by a lock or preload."
+  []
+  (some? @native-lock-module))
+
+(defn load-native-locks!
+  "Optional async preload of the native lock binding. Resolves to true, or
+   rejects with :clio.fs/native-lock-unavailable. Locks load it on demand
+   anyway; this lets a host surface a missing binding at a chosen time."
+  []
+  (js/Promise.
+   (fn [resolve reject]
+     (try
+       (load-native-lock-module!)
+       (resolve true)
+       (catch :default cause (reject cause))))))
+
 (defn- native-constant
   [name]
-  (aget (.-constants fs-ext) name))
+  (aget (.-constants ^js (load-native-lock-module!)) name))
 
 (defn- windows?
   []
@@ -182,16 +227,16 @@
   ;; advisory lock — "mandatory locking" is an unrelated, effectively dead
   ;; POSIX feature, not what F_SETLKW does.
   (try
-    (fs-ext/flockSync fd (if read-only? "sh" "ex"))
+    (.flockSync (load-native-lock-module!) fd (if read-only? "sh" "ex"))
     (catch :default cause
       (when-not (unsupported-flock? cause)
         (throw cause))))
-  (fs-ext/fcntlSync fd "setlkw" (native-constant (if read-only? "F_RDLCK" "F_WRLCK")) 0 0))
+  (.fcntlSync (load-native-lock-module!) fd "setlkw" (native-constant (if read-only? "F_RDLCK" "F_WRLCK")) 0 0))
 
 (defn- acquire-native-lock!
   [fd read-only?]
   (if (windows?)
-    (fs-ext/lockFileExSync
+    (.lockFileExSync (load-native-lock-module!)
      fd
      (if read-only? 0 (native-constant "LOCKFILE_EXCLUSIVE_LOCK"))
      0 0 0xffffffff 0xffffffff)
