@@ -28,3 +28,13 @@
   spore: none
   receipt-refs: 63bbd58ffd936f9214d31ea7bd70ca8a3d6410addc7993046810cb729a45030a
   note: "Bound changes to the exact runtime pin and required accountability; preserve prior bytes, incoming state and branch policy. Native service proof does not qualify a later member head."
+
+- ts: 2026-10-23T10:20:35.768076Z
+  session: codex/foresight-antigravity-rollout
+  task: Publish clio R6 reviewer runtime pin
+  p-efficiency: 0.95
+  p-friction: 0.05
+  p-skill-candidate: 0.0
+  spore: none
+  receipt-refs: 9a190a44ddde522a0a56ef2abbe411c16ee584d11a2ea7aad844d36519040fb7
+  note: "Bound changes to the exact runtime pin and required accountability; preserve prior bytes, incoming state and branch policy. Native service proof does not qualify a later member head."
