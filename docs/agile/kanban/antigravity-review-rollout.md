@@ -83,3 +83,8 @@ new board engine, or application/runtime implementation is authorized here.
   head to the live PR. Base advances require a fresh review; this caller does not
   automatically dispatch on base-branch pushes. Existing merge-candidate and
   deterministic gates remain required; a green historical check is insufficient.
+- A pointer to an authoritative receipt-validation contract distinguishing
+  accepted, notified, received and completed has not yet been identified. Locate
+  and review that contract before claiming those stages are verified. Clio's
+  integration scope here is evidence and receipt verification; identity and
+  transport are outside this caller proposal.
