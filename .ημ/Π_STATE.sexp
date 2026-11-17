@@ -1,0 +1,1 @@
+(:source-commit "4cde249f740d519c028bf7659304d07c3e79dc0a" :source-ref "refs/heads/codex/antigravity-review" :backup-branch "codex/backup/stealth/20261117T131806Z-clio4-publication" :snapshot-tag "Π/20261117T131806Z-stealth-clio4-publication" :worktree-state :clean :purpose :temporary-checkout-retirement)
